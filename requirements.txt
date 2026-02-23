@@ -1,0 +1,18 @@
+# CorelDRAW Automation Toolkit - Requirements
+# Python 3.8+ required
+
+# Core dependencies
+PyQt5>=5.15.0
+pywin32>=300
+pillow>=9.0.0
+
+# Optional but recommended
+pyinstaller>=5.0  # For creating executable
+nuitka>=1.0  # Alternative compiler
+
+# Development dependencies
+pytest>=7.0
+pytest-qt>=4.0
+black>=22.0
+flake8>=4.0
+mypy>=0.950
