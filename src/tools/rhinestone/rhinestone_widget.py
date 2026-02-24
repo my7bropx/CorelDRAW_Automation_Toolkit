@@ -14,6 +14,7 @@ Features:
 
 import logging
 from typing import Dict, Any
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
@@ -21,6 +22,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QMessageBox, QFileDialog, QFrame, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea,
     QSizePolicy, QListWidget, QListWidgetItem, QAbstractItemView,
+    QLineEdit,
     QGridLayout
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QSize
@@ -160,6 +162,55 @@ class RhinestoneWidget(QWidget):
         
         element_layout.addLayout(element_info)
         left_layout.addWidget(element_group)
+
+        # Image to Stones
+        image_group = QGroupBox("Image To Stones")
+        image_layout = QFormLayout(image_group)
+
+        image_hint = QLabel("Convert an image to stone placements")
+        image_hint.setStyleSheet("color: #aaa; font-size: 11px;")
+        image_layout.addRow(image_hint)
+
+        image_path_layout = QHBoxLayout()
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setPlaceholderText("Select image (PNG, JPG, etc.)")
+        image_path_layout.addWidget(self.image_path_edit)
+
+        self.image_browse_btn = QPushButton("Browse...")
+        self.image_browse_btn.clicked.connect(self._browse_image)
+        image_path_layout.addWidget(self.image_browse_btn)
+        image_layout.addRow("Image:", image_path_layout)
+
+        self.image_threshold = QDoubleSpinBox()
+        self.image_threshold.setRange(0.0, 1.0)
+        self.image_threshold.setSingleStep(0.05)
+        self.image_threshold.setValue(0.55)
+        image_layout.addRow("Threshold:", self.image_threshold)
+
+        self.image_invert = QCheckBox("Invert (use bright pixels)")
+        image_layout.addRow("", self.image_invert)
+
+        self.image_alpha = QDoubleSpinBox()
+        self.image_alpha.setRange(0.0, 1.0)
+        self.image_alpha.setSingleStep(0.05)
+        self.image_alpha.setValue(0.1)
+        image_layout.addRow("Alpha Cutoff:", self.image_alpha)
+
+        self.image_keep_aspect = QCheckBox("Keep Aspect Ratio")
+        self.image_keep_aspect.setChecked(True)
+        image_layout.addRow("", self.image_keep_aspect)
+
+        self.image_size_mode = QComboBox()
+        self.image_size_mode.addItem("Primary Size Only", "primary")
+        self.image_size_mode.addItem("Brightness -> Size", "brightness")
+        image_layout.addRow("Size Mode:", self.image_size_mode)
+
+        self.image_generate_btn = QPushButton("Generate From Image")
+        self.image_generate_btn.setToolTip("Uses container bounds and selected stone shapes")
+        self.image_generate_btn.clicked.connect(self._image_to_stones)
+        image_layout.addRow(self.image_generate_btn)
+
+        left_layout.addWidget(image_group)
 
         # Instructions
         instructions = QLabel(
@@ -608,6 +659,63 @@ class RhinestoneWidget(QWidget):
         index = self.primary_stone.findData(size_name)
         if index >= 0:
             self.primary_stone.setCurrentIndex(index)
+
+    def _browse_image(self):
+        """Select an image for conversion."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+        )
+        if path:
+            self.image_path_edit.setText(path)
+
+    def _image_to_stones(self):
+        """Convert an image to stone placements."""
+        if not corel.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Connect to CorelDRAW first.")
+            return
+
+        if not self._container_shape:
+            QMessageBox.warning(self, "No Container", "Set container first.")
+            return
+
+        if not self._element_shapes:
+            QMessageBox.warning(self, "No Elements", "Set element shapes first.")
+            return
+
+        image_path = self.image_path_edit.text().strip()
+        if not image_path:
+            QMessageBox.warning(self, "No Image", "Select an image first.")
+            return
+
+        try:
+            settings = self._get_settings()
+            bounds = self._get_shape_bounds(self._container_shape)
+            placements = self.engine.calculate_image_map(
+                Path(image_path),
+                bounds,
+                settings,
+                threshold=self.image_threshold.value(),
+                invert=self.image_invert.isChecked(),
+                alpha_threshold=self.image_alpha.value(),
+                keep_aspect=self.image_keep_aspect.isChecked(),
+                size_mode=self.image_size_mode.currentData(),
+            )
+
+            stats = self.engine.get_statistics()
+            self.stone_count_label.setText(str(stats['total_stones']))
+            self.coverage_label.setText(f"{stats['coverage_area']:.1f} sq mm")
+
+            if not placements:
+                QMessageBox.warning(self, "No Stones", "No stones generated. Try lowering threshold.")
+                return
+
+            placed = self.engine.place_stones_in_coreldraw(settings, self._element_shapes, bounds)
+            self.status_message.emit(f"Placed {len(placed)} stones from image")
+            QMessageBox.information(self, "Done", f"Placed {len(placed)} rhinestones from image!")
+
+        except Exception as e:
+            logger.error(f"Image conversion error: {e}")
+            QMessageBox.critical(self, "Error", str(e))
 
     def _on_auto_calc_toggle(self, state):
         """Handle auto-calculate grid size toggle."""

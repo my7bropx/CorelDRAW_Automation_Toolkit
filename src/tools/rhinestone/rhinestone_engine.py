@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from PIL import Image
+
 from ...core.corel_interface import (
     corel, Point, BoundingBox, NoSelectionError
 )
@@ -752,6 +754,128 @@ class RhinestoneEngine:
         self._stone_count = len(placements)
         return placements
 
+    def calculate_image_map(
+        self,
+        image_path: Path,
+        bounds,
+        settings: RhinestoneSettings,
+        threshold: float = 0.5,
+        invert: bool = False,
+        alpha_threshold: float = 0.1,
+        keep_aspect: bool = True,
+        size_mode: str = "primary",
+    ) -> List[RhinestonePlacement]:
+        """Convert an image into stone placements within bounds."""
+        placements: List[RhinestonePlacement] = []
+
+        if not image_path or not image_path.exists():
+            logger.warning("Image path not found for image mapping")
+            return placements
+
+        try:
+            img = Image.open(image_path).convert("RGBA")
+        except Exception as e:
+            logger.error(f"Failed to open image: {e}")
+            return placements
+
+        img_w, img_h = img.size
+        if img_w <= 0 or img_h <= 0:
+            return placements
+
+        try:
+            min_x = bounds.x
+            min_y = bounds.y
+            out_w = bounds.width
+            out_h = bounds.height
+        except Exception:
+            return placements
+
+        if out_w <= 0 or out_h <= 0:
+            return placements
+
+        scale_x = out_w / img_w
+        scale_y = out_h / img_h
+
+        if keep_aspect:
+            scale = min(scale_x, scale_y)
+            render_w = img_w * scale
+            render_h = img_h * scale
+            pad_x = (out_w - render_w) / 2
+            pad_y = (out_h - render_h) / 2
+            mm_per_px_x = scale
+            mm_per_px_y = scale
+        else:
+            render_w = out_w
+            render_h = out_h
+            pad_x = 0
+            pad_y = 0
+            mm_per_px_x = scale_x
+            mm_per_px_y = scale_y
+
+        # Determine base spacing from stone sizes
+        if settings and settings.stone_sizes and len(settings.stone_sizes) > 1:
+            base_diameter = self._average_diameter_from_settings(settings)
+        else:
+            base_diameter = self.get_stone_diameter(settings.stone_size)
+
+        base_spacing = max(base_diameter + settings.min_gap + settings.spacing, 0.1)
+        density = settings.density if settings and settings.density > 0 else 1.0
+        spacing = base_spacing / max(density, 0.1)
+
+        # Determine size order for brightness mapping
+        size_order = []
+        if settings and settings.stone_sizes:
+            size_order = sorted(settings.stone_sizes, key=self.get_stone_diameter)
+
+        pixels = img.load()
+
+        start_x = min_x + pad_x + spacing / 2
+        start_y = min_y + pad_y + spacing / 2
+
+        y = start_y
+        while y < min_y + pad_y + render_h:
+            x = start_x
+            while x < min_x + pad_x + render_w:
+                px = int((x - min_x - pad_x) / mm_per_px_x) if mm_per_px_x > 0 else 0
+                py = int((y - min_y - pad_y) / mm_per_px_y) if mm_per_px_y > 0 else 0
+
+                if 0 <= px < img_w and 0 <= py < img_h:
+                    r, g, b, a = pixels[px, py]
+                    alpha = a / 255.0
+                    if alpha_threshold > 0 and alpha < alpha_threshold:
+                        x += spacing
+                        continue
+
+                    brightness = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+                    place = brightness >= threshold if invert else brightness <= threshold
+
+                    if place:
+                        if size_mode == "brightness" and len(size_order) > 1:
+                            idx = int((1.0 - brightness) * (len(size_order) - 1) + 0.5)
+                            idx = max(0, min(len(size_order) - 1, idx))
+                            size_name = size_order[idx]
+                        else:
+                            size_name = settings.stone_size
+
+                        diameter = self.get_stone_diameter(size_name)
+                        placements.append(RhinestonePlacement(
+                            x=x,
+                            y=y,
+                            stone_size=size_name,
+                            rotation=settings.rotation if settings else 0.0,
+                            diameter=diameter,
+                        ))
+
+                x += spacing
+            y += spacing
+
+        if settings and settings.remove_overlaps:
+            placements = self._remove_overlaps(placements, settings.min_gap)
+
+        self._placements = placements
+        self._stone_count = len(placements)
+        return placements
+
     def _is_point_in_shape(self, x: float, y: float) -> bool:
         """Check if a point is inside the selected shape."""
         if not corel.is_connected:
@@ -844,18 +968,32 @@ class RhinestoneEngine:
                         # Clone the source shape
                         new_shape = source.Duplicate()
 
+                        desired_diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+                        base_size = (dims['width'] + dims['height']) / 2 if (dims['width'] > 0 or dims['height'] > 0) else 0
+                        if desired_diameter > 0 and base_size > 0:
+                            try:
+                                new_shape.SizeWidth = desired_diameter
+                                new_shape.SizeHeight = desired_diameter
+                            except Exception:
+                                try:
+                                    scale_factor = desired_diameter / base_size
+                                    new_shape.ScaleX = scale_factor
+                                    new_shape.ScaleY = scale_factor
+                                except Exception:
+                                    pass
+
                         # Calculate offset from original position to target position
-                        if dims['cx'] != 0 or dims['cy'] != 0:
-                            # Move to target position (placement.x, placement.y is the center)
-                            dx = placement.x - dims['cx']
-                            dy = placement.y - dims['cy']
+                        try:
+                            cx = getattr(new_shape, 'CenterX', 0) or dims['cx']
+                            cy = getattr(new_shape, 'CenterY', 0) or dims['cy']
+                            dx = placement.x - cx
+                            dy = placement.y - cy
                             new_shape.Move(dx, dy)
-                        else:
-                            # Use SetPosition for center positioning
+                        except Exception:
                             try:
                                 new_shape.CenterX = placement.x
                                 new_shape.CenterY = placement.y
-                            except:
+                            except Exception:
                                 new_shape.Move(placement.x, placement.y)
 
                         # Apply rotation if needed
@@ -901,7 +1039,10 @@ class RhinestoneEngine:
                 return selection.Item(1)
             
             # Create a new circle as fallback
-            doc = corel.get_active_document()
+            try:
+                doc = corel.active_document
+            except Exception:
+                doc = None
             if doc:
                 return doc.ActiveLayer.CreateCircle(0, 0, diameter / 2)
                 
