@@ -35,8 +35,6 @@ Run `CorelDRAW_Automation_Toolkit_Setup.exe` and follow prompts.
 6. Set **Distance** to 10mm
 7. Click **"Fill Curve"**
 
-Your shape is now duplicated along the entire curve!
-
 ## Step 4: Adjust Results
 
 - Use **+10/-10 buttons** to add/remove elements
@@ -67,19 +65,8 @@ Your shape is now duplicated along the entire curve!
 - Explore **Rhinestone Designer** for textile projects
 - Use **Batch Processor** for multiple files
 
-## Tips
-
-- **Ctrl+Z** works for undo in CorelDRAW
-- Use **Preview** before filling large curves
-- Save **presets** for your favorite settings
-- **Dark theme** is easier on the eyes
-
 ## Need Help?
 
 - Press **F1** for the full user manual
-- Check **docs/tutorials/** for video scripts
+- Check **docs**
 - Report issues on GitHub
-
----
-
-You're ready to automate! Explore the other tools and have fun creating!

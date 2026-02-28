@@ -50,18 +50,14 @@ def main():
         f"--distpath={dist_dir}",
         f"--workpath={build_dir}",
         f"--specpath={build_dir}",
-        # Add data files
         f"--add-data={project_root / 'README.md'};.",
         f"--add-data={project_root / 'LICENSE'};.",
-        # Hidden imports for COM
         "--hidden-import=win32com.gen_py",
         "--hidden-import=pythoncom",
         "--hidden-import=pywintypes",
-        # Entry point
         str(src_dir / "main.py"),
     ]
 
-    # Add icon if exists
     icon_path = src_dir / "resources" / "icons" / "app_icon.ico"
     if icon_path.exists():
         pyinstaller_args.insert(-1, f"--icon={icon_path}")
@@ -73,7 +69,6 @@ def main():
         return 1
 
     print("[4/5] Copying additional files...")
-    # Copy documentation
     dist_app_dir = dist_dir / "CorelDRAW_Automation_Toolkit"
     docs_dest = dist_app_dir / "docs"
     docs_dest.mkdir(exist_ok=True)
@@ -85,11 +80,9 @@ def main():
             dirs_exist_ok=True
         )
 
-    # Copy presets
     presets_dest = dist_app_dir / "presets"
     presets_dest.mkdir(exist_ok=True)
 
-    # Create default config
     config_dir = dist_app_dir / "config"
     config_dir.mkdir(exist_ok=True)
 
@@ -97,7 +90,6 @@ def main():
     print(f"\nExecutable created at: {dist_app_dir}")
     print(f"Run: {dist_app_dir / 'CorelDRAW_Automation_Toolkit.exe'}")
 
-    # Size report
     total_size = sum(f.stat().st_size for f in dist_app_dir.rglob('*') if f.is_file())
     print(f"\nTotal size: {total_size / (1024*1024):.1f} MB")
 

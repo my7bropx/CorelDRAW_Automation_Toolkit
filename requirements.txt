@@ -7,8 +7,8 @@ pywin32>=300
 pillow>=9.0.0
 
 # Optional but recommended
-pyinstaller>=5.0  # For creating executable
-nuitka>=1.0  # Alternative compiler
+pyinstaller>=5.0
+nuitka>=1.0 
 
 # Development dependencies
 pytest>=7.0

@@ -74,9 +74,9 @@ class RhinestoneSettings:
     random_rotation: bool = False
     outline_offset: float = 0.0
     fill_interior: bool = True
-    use_selected_shapes: bool = True  # Use shapes as they are (don't resize)
-    use_element_size: bool = True  # Use selected element size for spacing
-    remove_overlaps: bool = True  # Post-process to remove overlaps
+    use_selected_shapes: bool = True
+    use_element_size: bool = True
+    remove_overlaps: bool = True
     
     def __post_init__(self):
         if self.stone_sizes is None:

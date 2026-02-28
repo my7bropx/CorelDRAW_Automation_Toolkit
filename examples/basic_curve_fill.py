@@ -7,7 +7,6 @@ Demonstrates how to use the Curve Filler Engine programmatically.
 import sys
 from pathlib import Path
 
-# Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.corel_interface import corel
@@ -31,7 +30,6 @@ def main():
         print("    Make sure CorelDRAW is running!")
         return
 
-    # Step 2: Get selection
     print("\n[2] Please select:")
     print("    - First: Select a CURVE/PATH (container)")
     print("    - Second: Select ELEMENT(s) to fill with")
@@ -59,7 +57,6 @@ def main():
         print(f"    ERROR: {e}")
         return
 
-    # Step 3: Initialize engine
     print("\n[3] Initializing Curve Filler Engine...")
     engine = CurveFillerEngine()
 
@@ -71,7 +68,6 @@ def main():
         print(f"    ERROR: {e}")
         return
 
-    # Step 4: Configure settings
     print("\n[4] Configuring fill settings...")
     settings = FillSettings(
         spacing_mode=SpacingMode.FIXED,
@@ -83,7 +79,6 @@ def main():
     print(f"    Angle: Follow curve")
     print(f"    Collision detection: ON")
 
-    # Step 5: Preview
     print("\n[5] Calculating placements...")
     try:
         placements = engine.calculate_placements(settings)
@@ -92,7 +87,6 @@ def main():
         print(f"    ERROR: {e}")
         return
 
-    # Step 6: Confirm and execute
     confirm = input("\n[6] Execute fill? (y/n): ")
     if confirm.lower() != 'y':
         print("    Cancelled.")
@@ -106,7 +100,6 @@ def main():
         print(f"    ERROR: {e}")
         return
 
-    # Step 7: Post-fill options
     print("\n[7] Post-fill options:")
     print("    - Group all placed elements? (g)")
     print("    - Select all placed elements? (s)")
