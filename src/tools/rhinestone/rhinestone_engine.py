@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from PIL import Image
-
 from ...core.corel_interface import (
     corel, Point, BoundingBox, NoSelectionError
 )
@@ -47,6 +45,14 @@ class PatternType(Enum):
     RANDOM = "random"
 
 
+class OutputMode(Enum):
+    AUTO = "auto"
+    FAST_CIRCLES = "fast_circles"
+    ELEMENT_DUPLICATE = "element_duplicate"
+    LEGACY = "legacy"
+    PREVIEW_ONLY = "preview_only"
+
+
 @dataclass
 class RhinestonePlacement:
     """Represents a single rhinestone placement."""
@@ -62,9 +68,9 @@ class RhinestonePlacement:
 @dataclass
 class RhinestoneSettings:
     """Settings for rhinestone filling."""
-    stone_size: str = "SS10"
-    stone_sizes: List[str] = None  # Multiple sizes for mixed fills
-    size_distribution: List[float] = None  # Percentage for each size
+    stone_size: str = "SS10"  # Can be string (SS10) or float (3.0) for custom sizes
+    stone_sizes: List = None  # Multiple sizes for mixed fills (strings or floats)
+    size_distribution: List = None  # Percentage for each size
     pattern: PatternType = PatternType.HEXAGONAL
     density: float = 0.85
     spacing: float = 0.0  # Additional spacing in mm
@@ -77,6 +83,9 @@ class RhinestoneSettings:
     use_selected_shapes: bool = True
     use_element_size: bool = True
     remove_overlaps: bool = True
+    output_mode: OutputMode = OutputMode.AUTO
+    fast_output_threshold: int = 5000
+    progress_updates: int = 200
     
     def __post_init__(self):
         if self.stone_sizes is None:
@@ -107,9 +116,120 @@ class RhinestoneEngine:
         self._placements.clear()
         self._stone_count = 0
 
-    def get_stone_diameter(self, stone_size: str) -> float:
-        """Get diameter in mm for a stone size."""
-        return STONE_SIZES.get(stone_size, 2.8)
+    def _progress_stride(self, total: int, updates: int = 200) -> int:
+        """Throttle progress callbacks to reduce UI overhead."""
+        return max(1, total // max(1, updates))
+
+    def _resolve_output_mode(
+        self,
+        settings: RhinestoneSettings,
+        total: int,
+        source_shapes: Optional[List[Any]] = None,
+    ) -> OutputMode:
+        """Select the safest fast output mode without breaking explicit requests."""
+        if settings.output_mode in (OutputMode.PREVIEW_ONLY, OutputMode.LEGACY, OutputMode.FAST_CIRCLES, OutputMode.ELEMENT_DUPLICATE):
+            return settings.output_mode
+
+        if source_shapes:
+            if total >= max(1, settings.fast_output_threshold):
+                logger.warning(
+                    "Large rhinestone output job (%s stones) using cached element duplication. "
+                    "Plain circles would be faster.",
+                    total,
+                )
+            return OutputMode.ELEMENT_DUPLICATE
+
+        return OutputMode.FAST_CIRCLES
+
+    def _template_key(self, value: float) -> float:
+        """Round template cache keys to avoid floating-point duplication."""
+        return round(float(value), 4)
+
+    def _build_circle_templates(self, layer, placements: List["RhinestonePlacement"]) -> Dict[float, Any]:
+        """Create reusable centered circle templates keyed by diameter."""
+        templates: Dict[float, Any] = {}
+        for placement in placements:
+            diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+            key = self._template_key(diameter)
+            if key in templates:
+                continue
+            templates[key] = corel.create_circle_template(
+                layer,
+                diameter_mm=diameter,
+                outline_width_mm=0.10,
+                outline_rgb=(0, 0, 0),
+                no_fill=True,
+            )
+        return templates
+
+    def _build_element_templates(
+        self,
+        layer,
+        source_shapes: List[Any],
+        placements: List["RhinestonePlacement"],
+    ) -> Dict[Tuple[int, float], Any]:
+        """Create normalized centered templates for source elements and target diameters."""
+        templates: Dict[Tuple[int, float], Any] = {}
+        required: Dict[Tuple[int, float], RhinestonePlacement] = {}
+        for index, placement in enumerate(placements):
+            source_idx = placement.element_index % len(source_shapes) if placement.element_index is not None else (index % len(source_shapes))
+            diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+            key = (source_idx, self._template_key(diameter))
+            if key not in required:
+                required[key] = placement
+
+        for (source_idx, diameter_key), placement in required.items():
+            template = corel.duplicate_shape(source_shapes[source_idx])
+            try:
+                template.MoveToLayer(layer)
+            except Exception:
+                pass
+            diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+            if diameter > 0:
+                corel.resize_shape(template, diameter, diameter, keep_center=True)
+            corel.center_shape_at_origin(template)
+            templates[(source_idx, diameter_key)] = template
+
+        return templates
+
+    def _cleanup_templates(self, templates: Dict[Any, Any]) -> None:
+        """Delete temporary template shapes after placement completes."""
+        for template in templates.values():
+            try:
+                template.Delete()
+            except Exception:
+                pass
+
+    def _unpack_bounds(self, bounds) -> Tuple[float, float, float, float]:
+        """
+        Safely unpack any bounds object into (min_x, min_y, width, height).
+
+        Handles:
+          - BoundingBox dataclass  (.left, .bottom, .width, .height)
+          - Objects with .x / .y  (legacy fallback)
+          - Tuples/lists           (x1, y1, x2, y2)  — two-corner form
+        """
+        if hasattr(bounds, 'left'):
+            # Your BoundingBox dataclass: left, bottom, right, top
+            return bounds.left, bounds.bottom, bounds.width, bounds.height
+        elif hasattr(bounds, 'x'):
+            # Legacy / duck-typed object
+            return bounds.x, bounds.y, bounds.width, bounds.height
+        else:
+            # Tuple or list in two-corner form: (x1, y1, x2, y2)
+            return bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]
+
+    def get_stone_diameter(self, stone_size) -> float:
+        """Get diameter in mm for a stone size. Accepts string (SS10) or float (3.0)."""
+        if isinstance(stone_size, (int, float)):
+            return float(stone_size)
+        if isinstance(stone_size, str):
+            # Check if it's a numeric string
+            try:
+                return float(stone_size)
+            except ValueError:
+                return STONE_SIZES.get(stone_size, 2.8)
+        return 2.8
 
     def get_random_stone_size(self, settings: RhinestoneSettings) -> str:
         """Get a random stone size based on distribution."""
@@ -139,8 +259,7 @@ class RhinestoneEngine:
         diameters = []
         for shape in element_shapes:
             try:
-                w = getattr(shape, 'SizeWidth', 0) or 0
-                h = getattr(shape, 'SizeHeight', 0) or 0
+                w, h = corel.get_true_size(shape)
                 d = (w + h) / 2 if (w > 0 or h > 0) else 0
                 if d > 0:
                     diameters.append(d)
@@ -229,6 +348,9 @@ class RhinestoneEngine:
         density: float,
         min_gap: float,
         settings: RhinestoneSettings = None,
+        progress_controller=None,
+        progress_callback=None,
+        cancel_callback=None,
         rows: int = None,
         cols: int = None,
         stagger: bool = True,
@@ -272,14 +394,22 @@ class RhinestoneEngine:
         """
         placements = []
         density = max(0.1, min(float(density or 1.0), 1.0))
+
+        # ── Input validation ──────────────────────────────────────────────────
+        stone_diameter = self.get_stone_diameter(stone_size)
+        if stone_diameter <= 0:
+            logger.error(f"Invalid stone size '{stone_size}' — diameter must be > 0. Aborting.")
+            return placements
+        if min_gap < 0:
+            logger.warning(f"min_gap ({min_gap}) is negative — clamping to 0.")
+            min_gap = 0.0
         
-        # Get bounding box values
-        if hasattr(bounds, 'x'):
-            orig_min_x, orig_min_y = bounds.x, bounds.y
-            orig_width, orig_height = bounds.width, bounds.height
-        else:
-            orig_min_x, orig_min_y = bounds[0], bounds[1]
-            orig_width, orig_height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        # ── Unpack bounds safely regardless of type ───────────────────────────
+        orig_min_x, orig_min_y, orig_width, orig_height = self._unpack_bounds(bounds)
+
+        if orig_width <= 0 or orig_height <= 0:
+            logger.error(f"Invalid bounds — width={orig_width}, height={orig_height}. Aborting.")
+            return placements
         
         # Apply edge margin
         min_x = orig_min_x + edge_margin
@@ -350,6 +480,11 @@ class RhinestoneEngine:
         center_x = orig_min_x + orig_width / 2
         center_y = orig_min_y + orig_height / 2
         
+        total_cells = max(1, rows * cols)
+        processed_cells = 0
+        if progress_controller:
+            progress_controller.start_phase("Generating layout", total=total_cells)
+
         for row in range(rows):
             # Calculate stagger offset for honeycomb pattern
             if stagger:
@@ -360,6 +495,11 @@ class RhinestoneEngine:
             base_y = min_y + center_offset_y + row * effective_row_height
             
             for col in range(cols):
+                if cancel_callback and cancel_callback():
+                    logger.info("Rhinestone layout generation cancelled at row %s col %s.", row, col)
+                    self._placements = placements
+                    self._stone_count = len(placements)
+                    return placements
                 base_x = min_x + center_offset_x + col * effective_h_spacing + stagger_offset
                 
                 # Apply rotation around container center
@@ -424,8 +564,18 @@ class RhinestoneEngine:
                         diameter=actual_diameter
                     ))
 
+                processed_cells += 1
+                if progress_controller:
+                    progress_controller.update(processed_cells, total_cells)
+                elif progress_callback and (processed_cells % max(1, total_cells // 200) == 0 or processed_cells == total_cells):
+                    progress_callback(processed_cells, total_cells)
+
         if settings and settings.remove_overlaps:
+            if progress_controller:
+                progress_controller.start_phase("Removing overlaps", total=max(1, len(placements)))
             placements = self._remove_overlaps(placements, min_gap)
+            if progress_controller:
+                progress_controller.complete()
 
         self._placements = placements
         self._stone_count = len(placements)
@@ -447,8 +597,9 @@ class RhinestoneEngine:
         # Adjust for density
         effective_spacing = spacing / density
         
-        min_x, min_y = bounds.x, bounds.y
-        max_x, max_y = bounds.x + bounds.width, bounds.y + bounds.height
+        # ── Unpack bounds safely ──────────────────────────────────────────────
+        min_x, min_y, width, height = self._unpack_bounds(bounds)
+        max_x, max_y = min_x + width, min_y + height
         
         y = min_y
         while y < max_y:
@@ -481,9 +632,11 @@ class RhinestoneEngine:
         spacing = diameter + min_gap
         effective_spacing = spacing / density
         
-        cx = bounds.x + bounds.width / 2
-        cy = bounds.y + bounds.height / 2
-        max_radius = min(bounds.width, bounds.height) / 2
+        # ── Unpack bounds safely ──────────────────────────────────────────────
+        min_x, min_y, width, height = self._unpack_bounds(bounds)
+        cx = min_x + width / 2
+        cy = min_y + height / 2
+        max_radius = min(width, height) / 2
         
         radius = 0
         angle = 0
@@ -560,6 +713,9 @@ class RhinestoneEngine:
         density: float,
         min_gap: float,
         settings: RhinestoneSettings = None,
+        progress_controller=None,
+        progress_callback=None,
+        cancel_callback=None,
         count: int = None,
         seed: int = None,
         random_density: float = None,
@@ -573,13 +729,8 @@ class RhinestoneEngine:
         if seed is not None:
             random.seed(seed)
         
-        # Get bounding box values
-        if hasattr(bounds, 'x'):
-            min_x, min_y = bounds.x, bounds.y
-            width, height = bounds.width, bounds.height
-        else:
-            min_x, min_y = bounds[0], bounds[1]
-            width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        # ── Unpack bounds safely regardless of type ───────────────────────────
+        min_x, min_y, width, height = self._unpack_bounds(bounds)
         
         stone_diameter = self.get_stone_diameter(stone_size)
         element_diameters = []
@@ -615,8 +766,15 @@ class RhinestoneEngine:
 
         attempts = 0
         max_attempts = max_stones * 10
+        if progress_controller:
+            progress_controller.start_phase("Generating layout", total=max(1, max_attempts))
 
         while len(placements) < max_stones and attempts < max_attempts:
+            if cancel_callback and cancel_callback():
+                logger.info("Rhinestone random scatter cancelled after %s attempts.", attempts)
+                self._placements = placements
+                self._stone_count = len(placements)
+                return placements
             x = random.uniform(min_x, min_x + width)
             y = random.uniform(min_y, min_y + height)
 
@@ -672,6 +830,10 @@ class RhinestoneEngine:
                     grid.setdefault(_cell_key(x, y), []).append(len(placements) - 1)
 
             attempts += 1
+            if progress_controller:
+                progress_controller.update(attempts, max_attempts)
+            elif progress_callback and (attempts % max(1, max_attempts // 200) == 0 or attempts == max_attempts):
+                progress_callback(attempts, max_attempts)
         
         if settings and settings.remove_overlaps:
             placements = self._remove_overlaps(placements, min_gap)
@@ -695,13 +857,10 @@ class RhinestoneEngine:
         """
         placements = []
         
-        # Get bounds
+        # ── Unpack bounds safely ──────────────────────────────────────────────
         try:
-            min_x = bounds.x
-            min_y = bounds.y
-            width = bounds.width
-            height = bounds.height
-        except:
+            min_x, min_y, width, height = self._unpack_bounds(bounds)
+        except Exception:
             return placements
         
         diameter = self.get_stone_diameter(stone_size)
@@ -773,6 +932,7 @@ class RhinestoneEngine:
             return placements
 
         try:
+            from PIL import Image
             img = Image.open(image_path).convert("RGBA")
         except Exception as e:
             logger.error(f"Failed to open image: {e}")
@@ -782,11 +942,9 @@ class RhinestoneEngine:
         if img_w <= 0 or img_h <= 0:
             return placements
 
+        # ── Unpack bounds safely ──────────────────────────────────────────────
         try:
-            min_x = bounds.x
-            min_y = bounds.y
-            out_w = bounds.width
-            out_h = bounds.height
+            min_x, min_y, out_w, out_h = self._unpack_bounds(bounds)
         except Exception:
             return placements
 
@@ -908,14 +1066,20 @@ class RhinestoneEngine:
         
         return points
 
-    def place_stones_in_coreldraw(self, settings: RhinestoneSettings, element_shapes=None, bounds=None):
+    def place_stones_in_coreldraw(self, settings: RhinestoneSettings,
+                                   element_shapes=None, bounds=None,
+                                   progress_controller=None,
+                                   progress_callback=None,
+                                   cancel_callback=None):
         """
         Place the calculated stones in CorelDRAW inside the container bounds.
         
         Args:
-            settings: RhinestoneSettings object
-            element_shapes: List of element shapes to use as templates
-            bounds: Container bounds for positioning
+            settings:          RhinestoneSettings object.
+            element_shapes:    List of element shapes to use as templates.
+            bounds:            Container bounds for positioning.
+            progress_callback: Optional callable(current, total) for UI progress.
+            cancel_callback:   Optional callable() → bool; return True to abort early.
         """
         if not corel.is_connected:
             logger.warning("Not connected to CorelDRAW")
@@ -926,77 +1090,168 @@ class RhinestoneEngine:
             return []
         
         placed_shapes = []
+        total = len(self._placements)
+        source_shapes = list(element_shapes) if element_shapes else []
+        created_default_source = False
+        output_mode = self._resolve_output_mode(settings, total, source_shapes=source_shapes)
+        progress_stride = self._progress_stride(total, settings.progress_updates if settings else 200)
+
+        if output_mode == OutputMode.PREVIEW_ONLY:
+            logger.info("Rhinestone output skipped because preview-only mode is active.")
+            return []
         
         try:
             with corel.optimization_mode(), corel.command_group("Rhinestone Fill"):
-                # Use provided element shapes or get source stone
-                source_shapes = element_shapes if element_shapes else []
-
-                # If no element shapes provided, create a circle as fallback
+                if progress_controller:
+                    progress_controller.start_phase("Applying final output", total=total)
                 if not source_shapes:
                     source_shape = self._get_source_stone_shape(settings.stone_size)
                     if source_shape:
                         source_shapes = [source_shape]
+                        created_default_source = True
 
                 if not source_shapes:
                     logger.error("No source shapes available")
                     return []
 
-                # Get element dimensions for accurate placement
-                element_dims = []
-                for shape in source_shapes:
-                    try:
-                        w = getattr(shape, 'SizeWidth', 0) or 0
-                        h = getattr(shape, 'SizeHeight', 0) or 0
-                        cx = getattr(shape, 'CenterX', 0) or 0
-                        cy = getattr(shape, 'CenterY', 0) or 0
-                        element_dims.append({'width': w, 'height': h, 'cx': cx, 'cy': cy})
-                    except:
-                        element_dims.append({'width': 0, 'height': 0, 'cx': 0, 'cy': 0})
+                layer = corel.get_active_document().ActiveLayer
 
-                # Place each stone at calculated positions inside container
-                for i, placement in enumerate(self._placements):
+                if output_mode == OutputMode.FAST_CIRCLES:
+                    templates = self._build_circle_templates(layer, self._placements)
                     try:
-                        # Use element index if provided, otherwise cycle
+                        for index, placement in enumerate(self._placements, start=1):
+                            if cancel_callback and cancel_callback():
+                                logger.info("Stone placement cancelled after %s of %s.", index - 1, total)
+                                break
+
+                            diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+                            template = templates.get(self._template_key(diameter))
+                            if template is None:
+                                logger.warning(
+                                    "Missing circle template for diameter %.4f, skipping placement %s.",
+                                    diameter,
+                                    index,
+                                )
+                                continue
+
+                            new_shape = corel.duplicate_centered_template(
+                                template,
+                                placement.x,
+                                placement.y,
+                                rotation=placement.rotation,
+                            )
+                            placed_shapes.append(new_shape)
+
+                            if progress_controller:
+                                progress_controller.update(index, total)
+                            elif progress_callback and (index % progress_stride == 0 or index == total):
+                                progress_callback(index, total)
+                    finally:
+                        self._cleanup_templates(templates)
+
+                elif output_mode == OutputMode.ELEMENT_DUPLICATE:
+                    templates = self._build_element_templates(layer, source_shapes, self._placements)
+                    try:
+                        source_count = len(source_shapes)
+                        for index, placement in enumerate(self._placements, start=1):
+                            if cancel_callback and cancel_callback():
+                                logger.info("Stone placement cancelled after %s of %s.", index - 1, total)
+                                break
+
+                            source_idx = placement.element_index % source_count if placement.element_index is not None else ((index - 1) % source_count)
+                            diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
+                            key = (source_idx, self._template_key(diameter))
+                            template = templates.get(key)
+                            if template is None:
+                                logger.warning("Missing element template for key %s, skipping placement %s.", key, index)
+                                continue
+
+                            new_shape = corel.duplicate_centered_template(
+                                template,
+                                placement.x,
+                                placement.y,
+                                rotation=placement.rotation,
+                            )
+                            placed_shapes.append(new_shape)
+
+                            if progress_controller:
+                                progress_controller.update(index, total)
+                            elif progress_callback and (index % progress_stride == 0 or index == total):
+                                progress_callback(index, total)
+                    finally:
+                        self._cleanup_templates(templates)
+
+                else:
+
+                    # Cache true sizes of source shapes up front
+                    element_dims = []
+                    for shape in source_shapes:
+                        try:
+                            w, h = corel.get_true_size(shape)
+                            center = corel.get_shape_center(shape)
+                            cx = center.x
+                            cy = center.y
+                            element_dims.append({'width': w, 'height': h, 'cx': cx, 'cy': cy})
+                        except Exception:
+                            element_dims.append({'width': 0, 'height': 0, 'cx': 0, 'cy': 0})
+
+                if output_mode != OutputMode.LEGACY:
+                    if progress_controller:
+                        progress_controller.update(len(placed_shapes), total, force=True)
+                    elif progress_callback:
+                        progress_callback(len(placed_shapes), total)
+
+                    if len(placed_shapes) > 1:
+                        shapes = corel.app.CreateShapeRange()
+                        for shape in placed_shapes:
+                            shapes.Add(shape)
+                        try:
+                            shapes.Group()
+                        except Exception as e:
+                            logger.warning(f"Could not group shapes: {e}")
+
+                    logger.info(
+                        "Placed %s rhinestones inside container using output mode '%s'.",
+                        len(placed_shapes),
+                        output_mode.value,
+                    )
+                    return placed_shapes
+
+                for i, placement in enumerate(self._placements):
+                    # ── Honour cancellation ───────────────────────────────────
+                    if cancel_callback and cancel_callback():
+                        logger.info(f"Stone placement cancelled after {i} of {total}.")
+                        break
+
+                    try:
                         if placement.element_index is not None:
                             source_idx = placement.element_index % len(source_shapes)
                         else:
                             source_idx = i % len(source_shapes)
                         source = source_shapes[source_idx]
-                        dims = element_dims[source_idx]
+                        dims   = element_dims[source_idx]
 
-                        # Clone the source shape
                         new_shape = source.Duplicate()
 
                         desired_diameter = placement.diameter or self.get_stone_diameter(placement.stone_size)
-                        base_size = (dims['width'] + dims['height']) / 2 if (dims['width'] > 0 or dims['height'] > 0) else 0
-                        if desired_diameter > 0 and base_size > 0:
-                            try:
-                                new_shape.SizeWidth = desired_diameter
-                                new_shape.SizeHeight = desired_diameter
-                            except Exception:
-                                try:
-                                    scale_factor = desired_diameter / base_size
-                                    new_shape.ScaleX = scale_factor
-                                    new_shape.ScaleY = scale_factor
-                                except Exception:
-                                    pass
+                        if desired_diameter > 0:
+                            corel.resize_shape(new_shape, desired_diameter, desired_diameter, keep_center=True)
 
-                        # Calculate offset from original position to target position
+                        # Move to target position using CenterX/CenterY
                         try:
-                            cx = getattr(new_shape, 'CenterX', 0) or dims['cx']
-                            cy = getattr(new_shape, 'CenterY', 0) or dims['cy']
+                            center = corel.get_shape_center(new_shape)
+                            cx = center.x or dims['cx']
+                            cy = center.y or dims['cy']
                             dx = placement.x - cx
                             dy = placement.y - cy
-                            new_shape.Move(dx, dy)
+                            corel.move_shape_by(new_shape, dx, dy)
                         except Exception:
                             try:
-                                new_shape.CenterX = placement.x
-                                new_shape.CenterY = placement.y
+                                new_shape.CenterX = corel._mm_to_corel(placement.x)
+                                new_shape.CenterY = corel._mm_to_corel(placement.y)
                             except Exception:
-                                new_shape.Move(placement.x, placement.y)
+                                new_shape.Move(corel._mm_to_corel(placement.x), corel._mm_to_corel(placement.y))
 
-                        # Apply rotation if needed
                         if placement.rotation != 0:
                             new_shape.Rotate(placement.rotation)
 
@@ -1004,6 +1259,18 @@ class RhinestoneEngine:
 
                     except Exception as e:
                         logger.error(f"Error placing stone {i}: {e}")
+
+                    # ── Report progress every 10 shapes ──────────────────────
+                    if progress_controller:
+                        progress_controller.update(i + 1, total)
+                    elif progress_callback and ((i + 1) % progress_stride == 0 or (i + 1) == total):
+                        progress_callback(i + 1, total)
+
+                # Final progress tick
+                if progress_controller:
+                    progress_controller.update(len(placed_shapes), total, force=True)
+                elif progress_callback:
+                    progress_callback(len(placed_shapes), total)
 
                 # Group all placed stones for easier management
                 if len(placed_shapes) > 1:
@@ -1015,41 +1282,55 @@ class RhinestoneEngine:
                     except Exception as e:
                         logger.warning(f"Could not group shapes: {e}")
 
-            logger.info(f"Placed {len(placed_shapes)} rhinestones inside container")
+            logger.info(
+                "Placed %s rhinestones inside container using output mode '%s'.",
+                len(placed_shapes),
+                output_mode.value,
+            )
 
         except Exception as e:
             logger.error(f"Error placing stones: {e}")
+        finally:
+            if created_default_source:
+                try:
+                    source_shapes[0].Delete()
+                except Exception:
+                    pass
         
         return placed_shapes
 
     def _get_source_stone_shape(self, stone_size: str):
-        """Get or create a stone shape to use as template."""
-        # In a full implementation, this would check for an existing
-        # stone in the document or create a new circle
+        """
+        Create a new circle of the correct stone diameter as a template shape.
+
+        NOTE: This is only called when no element_shapes are provided by the user.
+        It must NOT call corel.get_selection() — that grabs whatever happens to be
+        selected at the moment, which is undefined inside optimization_mode().
+        It must NOT use CreateCircle(cx, cy, r) — that is not a CorelDRAW COM API.
+        The correct API is CreateEllipse(left, bottom, right, top).
+        """
         if not corel.is_connected:
             return None
-        
+
         try:
-            # Create a circle of the appropriate size
             diameter = self.get_stone_diameter(stone_size)
-            
-            # For now, try to get selection as source
-            selection = corel.get_selection()
-            if selection.Count > 0:
-                return selection.Item(1)
-            
-            # Create a new circle as fallback
-            try:
-                doc = corel.active_document
-            except Exception:
-                doc = None
-            if doc:
-                return doc.ActiveLayer.CreateCircle(0, 0, diameter / 2)
-                
+            if diameter <= 0:
+                logger.error(f"Invalid stone diameter for size '{stone_size}': {diameter}")
+                return None
+
+            doc = corel.get_active_document()
+            if not doc:
+                return None
+
+            radius = diameter / 2.0
+            # CreateEllipse(left, bottom, right, top) — all in document units (mm)
+            # Centred at origin; placement code will move it to the correct position.
+            ellipse = corel.create_ellipse(doc.ActiveLayer, 0.0, 0.0, radius, radius)
+            return ellipse
+
         except Exception as e:
-            logger.error(f"Error getting source shape: {e}")
-        
-        return None
+            logger.error(f"Error creating source stone shape: {e}")
+            return None
 
     def export_cut_file(
         self,
@@ -1159,12 +1440,34 @@ class RhinestoneEngine:
             # Draw circles at each stone position
             layer = page.Layers.Add()
             layer.Name = "Stone Template"
-            
+
+            templates = self._build_circle_templates(layer, self._placements)
+            try:
+                for p in self._placements:
+                    diameter = p.diameter if p.diameter else self.get_stone_diameter(p.stone_size)
+                    template = templates.get(self._template_key(diameter))
+                    if template is None:
+                        logger.warning("Missing template circle for %.4f mm during template generation.", diameter)
+                        continue
+
+                    corel.duplicate_centered_template(template, p.x, p.y)
+
+                    if show_labels:
+                        text = layer.CreateText(p.stone_size, corel._mm_to_corel(p.x), corel._mm_to_corel(p.y - diameter))
+                        text.Size = 2
+            finally:
+                self._cleanup_templates(templates)
+
+            doc.SaveAs(str(filepath))
+            logger.info(f"Generated template at {filepath}")
+            return True
+             
             for p in self._placements:
                 diameter = self.get_stone_diameter(p.stone_size)
+                radius = diameter / 2.0
                 
-                # Create circle
-                circle = layer.CreateCircle(p.x, p.y, diameter / 2)
+                # CreateEllipse(left, bottom, right, top) — CorelDRAW COM API
+                circle = corel.create_ellipse(layer, p.x, p.y, radius, radius)
                 
                 # Add outline
                 circle.OutlineWidth = 0.2
@@ -1204,3 +1507,99 @@ class RhinestoneEngine:
             area = math.pi * (diameter / 2) ** 2
             total += area
         return total
+
+    def _get_placement_bounds(self) -> Optional[BoundingBox]:
+        """Get a bounding box that covers all current placements."""
+        if not self._placements:
+            return None
+
+        min_x = min(
+            p.x - ((p.diameter if p.diameter else self.get_stone_diameter(p.stone_size)) / 2)
+            for p in self._placements
+        )
+        max_x = max(
+            p.x + ((p.diameter if p.diameter else self.get_stone_diameter(p.stone_size)) / 2)
+            for p in self._placements
+        )
+        min_y = min(
+            p.y - ((p.diameter if p.diameter else self.get_stone_diameter(p.stone_size)) / 2)
+            for p in self._placements
+        )
+        max_y = max(
+            p.y + ((p.diameter if p.diameter else self.get_stone_diameter(p.stone_size)) / 2)
+            for p in self._placements
+        )
+
+        return BoundingBox(left=min_x, bottom=min_y, right=max_x, top=max_y)
+
+    def _count_overlap_pairs(self, min_gap: float = 0.0) -> int:
+        """Count overlap-risk pairs in the current placements."""
+        if len(self._placements) < 2:
+            return 0
+
+        max_diameter = max(
+            (p.diameter if p.diameter else self.get_stone_diameter(p.stone_size))
+            for p in self._placements
+        )
+        cell_size = max(max_diameter + max(min_gap, 0.0), 0.1)
+        grid: Dict[Tuple[int, int], List[int]] = {}
+        overlap_pairs = 0
+
+        def _cell_key(x: float, y: float) -> Tuple[int, int]:
+            return (int(x // cell_size), int(y // cell_size))
+
+        for index, placement in enumerate(self._placements):
+            diameter = placement.diameter if placement.diameter else self.get_stone_diameter(placement.stone_size)
+            cx, cy = _cell_key(placement.x, placement.y)
+
+            for gx in (cx - 1, cx, cx + 1):
+                for gy in (cy - 1, cy, cy + 1):
+                    for other_index in grid.get((gx, gy), []):
+                        other = self._placements[other_index]
+                        other_diameter = other.diameter if other.diameter else self.get_stone_diameter(other.stone_size)
+                        min_dist = (diameter + other_diameter) / 2 + max(min_gap, 0.0)
+                        dx = placement.x - other.x
+                        dy = placement.y - other.y
+                        if (dx * dx + dy * dy) < (min_dist * min_dist):
+                            overlap_pairs += 1
+
+            grid.setdefault((cx, cy), []).append(index)
+
+        return overlap_pairs
+
+    def get_preview_summary(
+        self,
+        container_bounds=None,
+        settings: Optional[RhinestoneSettings] = None,
+        element_shapes=None,
+    ) -> Dict[str, Any]:
+        """Build a non-destructive preview summary for the current placements."""
+        stats = self.get_statistics()
+        placement_bounds = self._get_placement_bounds()
+        coverage_area = stats["coverage_area"]
+        overlap_pairs = self._count_overlap_pairs(settings.min_gap if settings else 0.0)
+
+        if container_bounds:
+            container_area = max(container_bounds.width, 0) * max(container_bounds.height, 0)
+        else:
+            container_area = 0.0
+
+        coverage_ratio = (coverage_area / container_area) if container_area > 0 else 0.0
+
+        if element_shapes:
+            output_mode = f"Will duplicate {len(element_shapes)} selected element shape(s)"
+        else:
+            output_mode = "Will create default circular stones"
+
+        return {
+            "total_stones": self._stone_count,
+            "size_distribution": stats["size_distribution"],
+            "coverage_area": coverage_area,
+            "container_area": container_area,
+            "coverage_ratio": coverage_ratio,
+            "placement_bounds": placement_bounds,
+            "overlap_pairs": overlap_pairs,
+            "has_overlap_warning": overlap_pairs > 0,
+            "output_mode": output_mode,
+            "uses_selected_elements": bool(element_shapes),
+        }

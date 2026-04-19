@@ -1,165 +1,253 @@
-"""
-Main Application Window
-Central hub for all CorelDRAW automation tools.
-"""
-
 import logging
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 
+from PyQt5.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QMenuBar, QMenu, QAction, QToolBar, QStatusBar, QLabel,
-    QDockWidget, QListWidget, QMessageBox, QFileDialog,
-    QProgressBar, QPushButton, QSplitter, QFrame, QApplication
+    QAction,
+    QApplication,
+    QDockWidget,
+    QFileDialog,
+    QFrame,
+    QInputDialog,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QSplitter,
+    QStackedWidget,
+    QStatusBar,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QKeySequence
 
 from ..config import config
-from ..core.corel_interface import corel, CorelDRAWConnectionError
+from ..core.corel_interface import CorelDRAWConnectionError, corel
 from ..core.preset_manager import preset_manager
-from .icon_utils import apply_button_icons
+from .dialogs.settings_dialog import SettingsDialog
 from .widgets.connection_indicator import ConnectionIndicator
+from .widgets.sidebar import Sidebar
+from .widgets.tool_base import ToolBaseWidget
 
 logger = logging.getLogger(__name__)
 
 
-class MainWindow(QMainWindow):
-    """Main application window with tabbed interface for all tools."""
+class TopLevelWidgetTraceFilter(QObject):
+    """Debug lifecycle filter for unexpected top-level widget activity."""
 
+    def eventFilter(self, watched, event):  # noqa: N802
+        if not isinstance(watched, QWidget):
+            return False
+        if watched.parentWidget() is not None:
+            return False
+        event_type = event.type()
+        if event_type in (QEvent.Show, QEvent.Hide, QEvent.Close):
+            logger.info(
+                "top-level-widget event=%s class=%s title=%s visible=%s object=%s",
+                int(event_type),
+                watched.__class__.__name__,
+                watched.windowTitle(),
+                watched.isVisible(),
+                watched.objectName(),
+            )
+        return False
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    key: str
+    title: str
+    factory: callable
+
+
+class SafeContextPanel(QWidget):
+    """Minimal right-side info dock that never replaces real tool controls."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Workspace Info")
+        title.setObjectName("context_title")
+        layout.addWidget(title)
+
+        card = QFrame()
+        card.setObjectName("context_card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 12, 12, 12)
+        card_layout.setSpacing(8)
+
+        self.tool_name_label = QLabel("No tool selected")
+        self.tool_name_label.setObjectName("context_tool_name")
+        card_layout.addWidget(self.tool_name_label)
+
+        self.tool_hint_label = QLabel(
+            "The active tool keeps its real settings and actions in the center workspace. "
+            "This panel stays informational only."
+        )
+        self.tool_hint_label.setWordWrap(True)
+        self.tool_hint_label.setObjectName("context_hint")
+        card_layout.addWidget(self.tool_hint_label)
+
+        self.connection_label = QLabel("CorelDRAW: Not Connected")
+        card_layout.addWidget(self.connection_label)
+
+        self.selection_label = QLabel("Selection: No Selection")
+        card_layout.addWidget(self.selection_label)
+
+        layout.addWidget(card)
+        layout.addStretch()
+
+    def set_tool(self, title: str) -> None:
+        self.tool_name_label.setText(title)
+
+    def set_connection(self, connected: bool) -> None:
+        if connected:
+            self.connection_label.setText(f"CorelDRAW: Connected ({corel.version})")
+        else:
+            self.connection_label.setText("CorelDRAW: Not Connected")
+
+    def set_selection_text(self, text: str) -> None:
+        self.selection_label.setText(f"Selection: {text}")
+
+
+class MainWindow(QMainWindow):
     connection_status_changed = pyqtSignal(bool)
+    selection_changed = pyqtSignal(int)
 
     def __init__(self):
-        """Initialize the main window."""
         super().__init__()
-
         self.setWindowTitle("CorelDRAW Automation Toolkit v0.1.0-beta")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1480, 900)
+        self.setMaximumSize(1480, 900)
+        self.setFixedSize(1480, 900)
 
-        # Restore window geometry
+        self._tool_specs = self._build_tool_specs()
+        self._tool_widgets = {}
+        self._tool_order = [spec.key for spec in self._tool_specs]
+        self._current_tool_key = None
+        self.preset_browser = None
+        self.preset_dock = None
+        self._tool_switch_timer = QTimer(self)
+        self._tool_switch_timer.setSingleShot(True)
+        self._tool_switch_timer.timeout.connect(self._finish_pending_tool_activation)
+        self._pending_tool_key = None
+        self._widget_trace_filter = TopLevelWidgetTraceFilter(self)
+        QApplication.instance().installEventFilter(self._widget_trace_filter)
+
         self._restore_geometry()
-
-        # Initialize components
         self._init_ui()
+        self._apply_window_behavior()
         self._create_menus()
         self._create_toolbars()
-        self._create_status_bar()
         self._create_dock_widgets()
+        self._create_status_bar()
         self._setup_connections()
         self._setup_timers()
 
-        # Try to connect to CorelDRAW (delayed to allow UI to show first)
         if config.app.auto_connect:
-            QTimer.singleShot(3000, self._auto_connect_coreldraw)
-
-        logger.info("Main window initialized.")
+            QTimer.singleShot(1200, self._auto_connect_coreldraw)
 
     def _init_ui(self):
-        """Initialize the main user interface."""
-        # Central widget with tab interface
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
 
-        main_layout = QVBoxLayout(self.central_widget)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Create tab widget for different tools
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setDocumentMode(True)
-        self.tab_widget.setTabPosition(QTabWidget.North)
-        self.tab_widget.setMinimumHeight(600)
+        self.splitter = QSplitter(Qt.Horizontal)
 
-        # Lazy-load tool widgets for faster startup
-        self._tool_keys = [
-            "curve_filler",
-            "rhinestone",
-            "batch_processor",
-            "object_tools",
-            "typography",
+        sidebar_items = [(spec.key, spec.title) for spec in self._tool_specs]
+        self.sidebar = Sidebar(sidebar_items)
+        self.sidebar.setMinimumWidth(220)
+        self.sidebar.setMaximumWidth(260)
+
+        self.workspace_stack = QStackedWidget()
+
+        self.context_host = QWidget()
+        self.context_layout = QVBoxLayout(self.context_host)
+        self.context_layout.setContentsMargins(0, 0, 0, 0)
+        self.context_layout.setSpacing(0)
+        self.context_host.setMinimumWidth(320)
+        self.context_host.setMaximumWidth(380)
+        self.default_context_panel = SafeContextPanel(self)
+        self._set_context_widget(self.default_context_panel)
+
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.workspace_stack)
+        self.splitter.addWidget(self.context_host)
+        self.splitter.setSizes([220, 930, 330])
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        root.addWidget(self.splitter)
+
+        self.sidebar.tool_selected.connect(self._activate_tool)
+        if self._tool_order:
+            self._activate_tool(self._tool_order[0])
+
+    def _build_tool_specs(self):
+        return [
+            ToolSpec("curve_filler", "Curve Filler", self._create_curve_filler_widget),
+            ToolSpec("rhinestone", "Rhinestone Designer", self._create_rhinestone_widget),
+            ToolSpec("hexagon", "Hexagon Designer", self._create_hexagon_widget),
+            ToolSpec("photo_svg", "Photo Pointillizer", self._create_photo_svg_widget),
+            ToolSpec("pattern_fill", "Pattern Fill", self._create_pattern_fill_widget),
+            ToolSpec("batch_processor", "Batch Processor", self._create_batch_processor_widget),
+            ToolSpec("object_tools", "Object Tools", self._create_object_tools_widget),
+            ToolSpec("typography", "Typography", self._create_typography_widget),
         ]
-        self._tool_titles = {
-            "curve_filler": "Curve Filler",
-            "rhinestone": "Rhinestone Designer",
-            "batch_processor": "Batch Processor",
-            "object_tools": "Object Tools",
-            "typography": "Typography",
-        }
-        self._tool_widgets = {}
 
-        for key in self._tool_keys:
-            placeholder = QFrame()
-            placeholder_layout = QVBoxLayout(placeholder)
-            placeholder_layout.setContentsMargins(10, 10, 10, 10)
-            label = QLabel(f"Loading {self._tool_titles[key]}...")
-            label.setStyleSheet("color: #aaa;")
-            placeholder_layout.addWidget(label)
-            placeholder_layout.addStretch()
-            self.tab_widget.addTab(placeholder, self._tool_titles[key])
+    def _create_curve_filler_widget(self):
+        from ..tools.curve_filler.curve_filler_widget import CurveFillerWidget
 
-        self.tab_widget.currentChanged.connect(self._on_tab_changed)
-        self._ensure_tool(self.tab_widget.currentIndex())
+        return CurveFillerWidget(self)
 
-        main_layout.addWidget(self.tab_widget)
+    def _create_rhinestone_widget(self):
+        from ..tools.rhinestone.rhinestone_widget import RhinestoneWidget
 
-    def _create_tool_widget(self, key: str):
-        """Create a tool widget on demand."""
-        if key == "curve_filler":
-            from ..tools.curve_filler.curve_filler_widget import CurveFillerWidget
-            return CurveFillerWidget()
-        if key == "rhinestone":
-            from ..tools.rhinestone.rhinestone_widget import RhinestoneWidget
-            return RhinestoneWidget()
-        if key == "batch_processor":
-            from ..tools.batch_processor.batch_widget import BatchProcessorWidget
-            return BatchProcessorWidget()
-        if key == "object_tools":
-            from ..tools.object_manipulation.object_tools_widget import ObjectToolsWidget
-            return ObjectToolsWidget()
-        if key == "typography":
-            from ..tools.typography.typography_widget import TypographyWidget
-            return TypographyWidget()
-        raise ValueError(f"Unknown tool key: {key}")
+        return RhinestoneWidget(self)
 
-    def _connect_tool_signals(self, widget):
-        """Connect tool widget signals to main window."""
-        if hasattr(widget, "status_message"):
-            widget.status_message.connect(self._show_status_message)
-        if hasattr(widget, "progress_updated"):
-            widget.progress_updated.connect(self._update_progress)
+    def _create_hexagon_widget(self):
+        from ..tools.hexagon.hexagon_widget import HexagonWidget
 
-    def _ensure_tool(self, index: int):
-        """Ensure the tool for a given tab index is created."""
-        if index < 0 or index >= len(self._tool_keys):
-            return
-        key = self._tool_keys[index]
-        if key in self._tool_widgets:
-            return
-        widget = self._create_tool_widget(key)
-        self._tool_widgets[key] = widget
+        return HexagonWidget(self)
 
-        # Replace placeholder tab
-        self.tab_widget.removeTab(index)
-        self.tab_widget.insertTab(index, widget, self._tool_titles[key])
-        self.tab_widget.setCurrentIndex(index)
-        self._connect_tool_signals(widget)
+    def _create_photo_svg_widget(self):
+        from ..tools.photo_to_rhinestone_svg.photo_to_rhinestone_svg_widget import PhotoToRhinestoneSvgWidget
 
-    def _on_tab_changed(self, index: int):
-        """Lazy-create tool on first tab visit."""
-        self._ensure_tool(index)
+        return PhotoToRhinestoneSvgWidget(self)
 
-    def _get_tool_widget(self, key: str):
-        """Get tool widget, creating it if needed."""
-        if key not in self._tool_widgets:
-            index = self._tool_keys.index(key)
-            self._ensure_tool(index)
-        return self._tool_widgets.get(key)
+    def _create_pattern_fill_widget(self):
+        from ..tools.pattern_fill.pattern_fill_widget import PatternFillWidget
+
+        return PatternFillWidget(self)
+
+    def _create_batch_processor_widget(self):
+        from ..tools.batch_processor.batch_widget import BatchProcessorWidget
+
+        return BatchProcessorWidget(self)
+
+    def _create_object_tools_widget(self):
+        from ..tools.object_manipulation.object_tools_widget import ObjectToolsWidget
+
+        return ObjectToolsWidget(self)
+
+    def _create_typography_widget(self):
+        from ..tools.typography.typography_widget import TypographyWidget
+
+        return TypographyWidget(self)
 
     def _create_menus(self):
-        """Create application menus."""
         menubar = self.menuBar()
 
-        # File Menu
         file_menu = menubar.addMenu("&File")
 
         new_action = QAction("&New Project", self)
@@ -179,10 +267,16 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        # Recent files submenu
         self.recent_menu = QMenu("Recent Files", self)
         self._update_recent_files_menu()
         file_menu.addMenu(self.recent_menu)
+
+        file_menu.addSeparator()
+
+        settings_action = QAction("&Settings...", self)
+        settings_action.setShortcut(QKeySequence.Preferences)
+        settings_action.triggered.connect(self._open_settings_dialog)
+        file_menu.addAction(settings_action)
 
         file_menu.addSeparator()
 
@@ -191,7 +285,6 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Edit Menu
         edit_menu = menubar.addMenu("&Edit")
 
         undo_action = QAction("&Undo", self)
@@ -205,13 +298,8 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(redo_action)
 
         edit_menu.addSeparator()
-
-        settings_action = QAction("&Settings...", self)
-        settings_action.setShortcut("Ctrl+,")
-        settings_action.triggered.connect(self._show_settings)
         edit_menu.addAction(settings_action)
 
-        # Tools Menu
         tools_menu = menubar.addMenu("&Tools")
 
         connect_action = QAction("Connect to CorelDRAW", self)
@@ -222,14 +310,18 @@ class MainWindow(QMainWindow):
         disconnect_action.triggered.connect(self._disconnect_coreldraw)
         tools_menu.addAction(disconnect_action)
 
-        tools_menu.addSeparator()
-
         refresh_action = QAction("Refresh CorelDRAW", self)
         refresh_action.setShortcut("F5")
         refresh_action.triggered.connect(self._refresh_coreldraw)
         tools_menu.addAction(refresh_action)
 
-        # Presets Menu
+        tools_menu.addSeparator()
+
+        for spec in self._tool_specs:
+            action = QAction(spec.title, self)
+            action.triggered.connect(lambda checked=False, key=spec.key: self._activate_tool(key))
+            tools_menu.addAction(action)
+
         presets_menu = menubar.addMenu("&Presets")
 
         save_preset_action = QAction("Save Current as Preset...", self)
@@ -250,28 +342,22 @@ class MainWindow(QMainWindow):
         import_preset_action.triggered.connect(self._import_preset)
         presets_menu.addAction(import_preset_action)
 
-        export_preset_action = QAction("Export Preset...", self)
+        export_preset_action = QAction("Export Selected Preset...", self)
         export_preset_action.triggered.connect(self._export_preset)
         presets_menu.addAction(export_preset_action)
 
-        # View Menu
         view_menu = menubar.addMenu("&View")
 
-        toggle_preset_browser = QAction("Preset Browser", self, checkable=True)
-        toggle_preset_browser.setChecked(True)
-        toggle_preset_browser.triggered.connect(self._toggle_preset_browser)
-        view_menu.addAction(toggle_preset_browser)
-        self.toggle_preset_browser_action = toggle_preset_browser
+        self.toggle_context_panel_action = QAction("Right Info Panel", self, checkable=True)
+        self.toggle_context_panel_action.setChecked(True)
+        self.toggle_context_panel_action.toggled.connect(self._toggle_context_panel)
+        view_menu.addAction(self.toggle_context_panel_action)
 
-        view_menu.addSeparator()
+        self.toggle_preset_browser_action = QAction("Preset Browser", self, checkable=True)
+        self.toggle_preset_browser_action.setChecked(False)
+        self.toggle_preset_browser_action.toggled.connect(self._toggle_preset_browser)
+        view_menu.addAction(self.toggle_preset_browser_action)
 
-        dark_theme_action = QAction("Dark Theme", self, checkable=True)
-        dark_theme_action.setChecked(config.app.theme == "dark")
-        dark_theme_action.triggered.connect(self._toggle_theme)
-        view_menu.addAction(dark_theme_action)
-        self.dark_theme_action = dark_theme_action
-
-        # Help Menu
         help_menu = menubar.addMenu("&Help")
 
         help_contents_action = QAction("&Help Contents", self)
@@ -285,10 +371,10 @@ class MainWindow(QMainWindow):
 
         help_menu.addSeparator()
 
-        keyboard_shortcuts_action = QAction("&Keyboard Shortcuts", self)
-        keyboard_shortcuts_action.setShortcut("Ctrl+/")
-        keyboard_shortcuts_action.triggered.connect(self._show_shortcuts)
-        help_menu.addAction(keyboard_shortcuts_action)
+        shortcuts_action = QAction("&Keyboard Shortcuts", self)
+        shortcuts_action.setShortcut("Ctrl+/")
+        shortcuts_action.triggered.connect(self._show_shortcuts)
+        help_menu.addAction(shortcuts_action)
 
         help_menu.addSeparator()
 
@@ -303,252 +389,274 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
 
     def _create_toolbars(self):
-        """Create application toolbars."""
-        # Main toolbar
-        main_toolbar = self.addToolBar("Main")
-        main_toolbar.setMovable(False)
-        main_toolbar.setIconSize(QSize(24, 24))
+        self.main_toolbar = QToolBar("Main", self)
+        self.main_toolbar.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
 
-        # Connection indicator
-        self.connection_indicator = ConnectionIndicator()
-        main_toolbar.addWidget(self.connection_indicator)
-        main_toolbar.addSeparator()
+        connect_action = QAction("Connect", self)
+        connect_action.triggered.connect(self._connect_coreldraw)
+        self.main_toolbar.addAction(connect_action)
 
-        # Get icon paths
-        icons_path = Path(__file__).parent.parent / "resources" / "icons"
-        
-        # Quick action buttons with icons
-        connect_btn = QPushButton("Connect")
-        connect_icon_path = icons_path / "connect.png"
-        if connect_icon_path.exists():
-            connect_btn.setIcon(QIcon(str(connect_icon_path)))
-        connect_btn.setToolTip("Connect to CorelDRAW")
-        connect_btn.clicked.connect(self._connect_coreldraw)
-        main_toolbar.addWidget(connect_btn)
+        refresh_action = QAction("Refresh", self)
+        refresh_action.triggered.connect(self._refresh_coreldraw)
+        self.main_toolbar.addAction(refresh_action)
 
-        refresh_btn = QPushButton("Refresh")
-        refresh_icon_path = icons_path / "refresh.png"
-        if refresh_icon_path.exists():
-            refresh_btn.setIcon(QIcon(str(refresh_icon_path)))
-        refresh_btn.setToolTip("Refresh CorelDRAW (F5)")
-        refresh_btn.clicked.connect(self._refresh_coreldraw)
-        main_toolbar.addWidget(refresh_btn)
+        self.main_toolbar.addSeparator()
 
-        main_toolbar.addSeparator()
+        presets_action = QAction("Presets", self)
+        presets_action.triggered.connect(self._load_preset)
+        self.main_toolbar.addAction(presets_action)
 
-        # Quick preset access
-        preset_label = QLabel("Quick Presets:")
-        main_toolbar.addWidget(preset_label)
+        settings_action = QAction("Settings", self)
+        settings_action.triggered.connect(self._open_settings_dialog)
+        self.main_toolbar.addAction(settings_action)
 
-        self.quick_preset_btn = QPushButton("Load Preset")
-        self.quick_preset_btn.clicked.connect(self._quick_load_preset)
-        main_toolbar.addWidget(self.quick_preset_btn)
+        self.main_toolbar.addSeparator()
 
-        main_toolbar.addSeparator()
-
-        # Help button
-        help_btn = QPushButton("Help")
-        help_icon_path = icons_path / "help.png"
-        if help_icon_path.exists():
-            help_btn.setIcon(QIcon(str(help_icon_path)))
-        help_btn.setToolTip("Open Help (F1)")
-        help_btn.clicked.connect(self._show_help_contents)
-        main_toolbar.addWidget(help_btn)
-
-        icon_map = {
-            "load preset": "action.png",
-        }
-        apply_button_icons(self, icon_map)
-
-    def _create_status_bar(self):
-        """Create the status bar."""
-        self.status_bar = self.statusBar()
-
-        # Connection status label
-        self.connection_label = QLabel("Not Connected")
-        self.status_bar.addWidget(self.connection_label)
-
-        # Spacer
-        spacer = QWidget()
-        spacer.setFixedWidth(20)
-        self.status_bar.addWidget(spacer)
-
-        # Selection info
-        self.selection_label = QLabel("No Selection")
-        self.status_bar.addWidget(self.selection_label)
-
-        # Progress bar (hidden by default)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMaximumWidth(200)
-        self.progress_bar.setVisible(False)
-        self.status_bar.addPermanentWidget(self.progress_bar)
-
-        # Version label
-        version_label = QLabel("v0.1.0-beta")
-        self.status_bar.addPermanentWidget(version_label)
+        help_action = QAction("Help", self)
+        help_action.triggered.connect(self._show_help_contents)
+        self.main_toolbar.addAction(help_action)
 
     def _create_dock_widgets(self):
-        """Create dockable widgets."""
-        # Preset browser dock
         self.preset_dock = QDockWidget("Preset Browser", self)
         self.preset_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.preset_browser = None
-        placeholder = QLabel("Preset browser loading...")
-        placeholder.setStyleSheet("color: #aaa; padding: 10px;")
+        placeholder = QLabel("Preset browser opens on demand.")
+        placeholder.setContentsMargins(12, 12, 12, 12)
         self.preset_dock.setWidget(placeholder)
-        self.preset_dock.visibilityChanged.connect(self._on_preset_dock_visible)
-
+        self.preset_dock.visibilityChanged.connect(self._on_preset_dock_visibility_changed)
         self.addDockWidget(Qt.RightDockWidgetArea, self.preset_dock)
+        self.preset_dock.hide()
 
-    def _on_preset_dock_visible(self, visible: bool):
-        """Lazy-create preset browser when dock is shown."""
-        if not visible or self.preset_browser is not None:
-            return
-        from .widgets.preset_browser import PresetBrowser
-        self.preset_browser = PresetBrowser()
-        self.preset_browser.preset_selected.connect(self._apply_preset)
-        self.preset_dock.setWidget(self.preset_browser)
+    def _create_status_bar(self):
+        status = QStatusBar()
+        self.setStatusBar(status)
+
+        self.connection_indicator = ConnectionIndicator()
+        status.addPermanentWidget(self.connection_indicator)
+
+        self.connection_label = QLabel("Not Connected")
+        status.addWidget(self.connection_label)
+
+        self.selection_label = QLabel("No Selection")
+        status.addWidget(self.selection_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximumWidth(220)
+        self.progress_bar.setVisible(False)
+        status.addPermanentWidget(self.progress_bar)
+
+        version_label = QLabel("v0.1.0-beta")
+        status.addPermanentWidget(version_label)
 
     def _setup_connections(self):
-        """Setup signal connections."""
         self.connection_status_changed.connect(self._on_connection_status_changed)
-        # Tool signals are connected lazily when tools are created
 
     def _setup_timers(self):
-        """Setup periodic timers."""
-        # Auto-save timer
-        if config.app.auto_save:
-            self.auto_save_timer = QTimer(self)
-            self.auto_save_timer.timeout.connect(self._auto_save)
-            self.auto_save_timer.start(config.app.auto_save_interval * 1000)
+        self.connection_timer = QTimer(self)
+        self.connection_timer.timeout.connect(self._sync_connection_status)
+        self.connection_timer.start(1000)
 
-        # Selection update timer
         self.selection_timer = QTimer(self)
         self.selection_timer.timeout.connect(self._update_selection_info)
-        self.selection_timer.start(2000)  # Every 2 seconds
+        self.selection_timer.start(1500)
 
-    def _restore_geometry(self):
-        """Restore window size and position from config."""
-        width = config.app.window_width or 1400
-        height = config.app.window_height or 900
-        x = config.app.window_x
-        y = config.app.window_y
-        
-        if x >= 0 and y >= 0:
-            self.setGeometry(x, y, width, height)
-        else:
-            self.resize(width, height)
-        
-        if config.app.window_maximized:
-            self.showMaximized()
+    def _connect_tool_signals(self, widget: ToolBaseWidget):
+        if hasattr(widget, "status_message"):
+            widget.status_message.connect(self._show_status_message)
+        if hasattr(widget, "progress_updated"):
+            widget.progress_updated.connect(self._update_progress)
+        if hasattr(widget, "on_selection_changed"):
+            self.selection_changed.connect(widget.on_selection_changed)
 
-    def _save_geometry(self):
-        """Save current window geometry to config."""
-        if self.isMaximized():
-            config.app.window_maximized = True
-        else:
-            config.app.window_maximized = False
-            config.app.window_width = self.width()
-            config.app.window_height = self.height()
-            config.app.window_x = self.x()
-            config.app.window_y = self.y()
+    def _activate_tool(self, key: str):
+        if key not in self._tool_order:
+            return
+        self._pending_tool_key = key
+        self._tool_switch_timer.start(20)
+
+    def _finish_pending_tool_activation(self):
+        key = self._pending_tool_key
+        if key is None or key not in self._tool_order:
+            return
+        import time
+        switch_started = time.perf_counter()
+        self._pending_tool_key = None
+
+        previous_widget = self._current_tool_widget()
+        if previous_widget is not None and previous_widget is not self._tool_widgets.get(key):
+            try:
+                previous_widget.on_deactivate()
+            except Exception as exc:
+                logger.warning("Failed to deactivate tool %s: %s", self._current_tool_key, exc)
+
+        widget = self._ensure_tool_widget(key)
+        if widget is None:
+            return
+
+        self._current_tool_key = key
+        self.workspace_stack.setCurrentWidget(widget)
+        try:
+            widget.on_activate()
+        except Exception as exc:
+            logger.warning("Failed to activate tool %s: %s", key, exc)
+        spec = next((item for item in self._tool_specs if item.key == key), None)
+        if spec:
+            self.default_context_panel.set_tool(spec.title)
+        self._set_context_widget(self._resolve_context_widget(widget))
+        logger.info("tool-switch activated key=%s elapsed=%.2fms", key, (time.perf_counter() - switch_started) * 1000.0)
+        QTimer.singleShot(35, lambda: self._refresh_current_tool_selection(force=False))
+
+    def _ensure_tool_widget(self, key: str):
+        if key in self._tool_widgets:
+            return self._tool_widgets[key]
+
+        spec = next((item for item in self._tool_specs if item.key == key), None)
+        if spec is None:
+            return None
+
+        import time
+        started = time.perf_counter()
+        widget = spec.factory()
+        logger.info("tool-widget created key=%s class=%s elapsed=%.2fms", key, widget.__class__.__name__, (time.perf_counter() - started) * 1000.0)
+        self._tool_widgets[key] = widget
+        self.workspace_stack.addWidget(widget)
+        self._connect_tool_signals(widget)
+        return widget
+
+    def _current_tool_widget(self):
+        if self._current_tool_key is None:
+            return None
+        return self._tool_widgets.get(self._current_tool_key)
+
+    def _set_context_widget(self, widget: QWidget):
+        if widget is None:
+            widget = self.default_context_panel
+        while self.context_layout.count():
+            item = self.context_layout.takeAt(0)
+            child = item.widget()
+            if child:
+                child.hide()
+                if child is not widget:
+                    child.setParent(None)
+        if widget.parentWidget() is not self.context_host:
+            widget.setParent(self.context_host)
+        self.context_layout.addWidget(widget)
+        widget.setVisible(True)
+
+    def _resolve_context_widget(self, widget: QWidget) -> QWidget:
+        if isinstance(widget, ToolBaseWidget):
+            panel = widget.context_panel()
+            if panel is not None:
+                return panel
+        return self.default_context_panel
+
+    def _refresh_current_tool_selection(self, force: bool = False):
+        if self._current_tool_key is None:
+            return
+        widget = self._tool_widgets.get(self._current_tool_key)
+        if widget and hasattr(widget, "refresh_selection_state"):
+            try:
+                widget.refresh_selection_state(force=force)
+            except Exception as exc:
+                logger.warning("Failed to refresh tool selection state: %s", exc)
 
     def _auto_connect_coreldraw(self):
-        """Attempt to automatically connect to CorelDRAW."""
         try:
-            corel.connect()
-            self.connection_status_changed.emit(True)
-            self._show_status_message("Connected to CorelDRAW")
-        except CorelDRAWConnectionError as e:
-            logger.info(f"Auto-connect failed: {e}")
-            self._show_status_message("CorelDRAW not running - click Connect when ready")
+            corel.connect(config.app.preferred_corel_version)
+            self._sync_connection_status(show_message=True, connected_message="Connected to CorelDRAW")
+        except CorelDRAWConnectionError as exc:
+            logger.info("Auto-connect failed: %s", exc)
+            self.connection_status_changed.emit(False)
+            self._show_status_message("CorelDRAW not running")
 
     def _connect_coreldraw(self):
-        """Connect to CorelDRAW."""
         try:
-            corel.connect()
-            self.connection_status_changed.emit(True)
-            self._show_status_message(f"Connected to CorelDRAW {corel.version}")
-            QMessageBox.information(
-                self, "Connected",
-                f"Successfully connected to CorelDRAW {corel.version}"
-            )
-        except CorelDRAWConnectionError as e:
+            corel.connect(config.app.preferred_corel_version)
+            self._sync_connection_status()
+            self._refresh_current_tool_selection(force=True)
+            QMessageBox.information(self, "Connected", f"Connected to CorelDRAW {corel.version}")
+        except CorelDRAWConnectionError as exc:
             self.connection_status_changed.emit(False)
-            QMessageBox.warning(
-                self, "Connection Failed",
-                f"Failed to connect to CorelDRAW:\n{e}\n\n"
-                "Please ensure CorelDRAW is running."
-            )
+            QMessageBox.warning(self, "Connection Failed", str(exc))
 
     def _disconnect_coreldraw(self):
-        """Disconnect from CorelDRAW."""
         corel.disconnect()
         self.connection_status_changed.emit(False)
         self._show_status_message("Disconnected from CorelDRAW")
 
     def _refresh_coreldraw(self):
-        """Refresh CorelDRAW display."""
         if corel.is_connected:
             corel.refresh()
+            self._update_selection_info(force=True)
             self._show_status_message("CorelDRAW refreshed")
         else:
-            self._show_status_message("Not connected to CorelDRAW")
+            self.connection_status_changed.emit(False)
+            self._show_status_message("Not connected")
 
     def _on_connection_status_changed(self, connected: bool):
-        """Handle connection status changes."""
         self.connection_indicator.set_connected(connected)
+        self.default_context_panel.set_connection(connected)
         if connected:
             self.connection_label.setText(f"Connected to CorelDRAW {corel.version}")
-            self._update_selection_info()
+            self._update_selection_info(force=True)
         else:
             self.connection_label.setText("Not Connected")
             self.selection_label.setText("No Selection")
+            self.default_context_panel.set_selection_text("No Selection")
 
-    def _update_selection_info(self):
-        """Update selection information in status bar."""
+    def _sync_connection_status(self, show_message: bool = False, connected_message: str = "Connected to CorelDRAW") -> bool:
+        connected = corel.is_connected
+        self.connection_status_changed.emit(connected)
+        if show_message:
+            self._show_status_message(connected_message if connected else "Not connected")
+        return connected
+
+    def _update_selection_info(self, force: bool = False):
         if not corel.is_connected:
+            self.connection_status_changed.emit(False)
+            self.selection_label.setText("No Selection")
+            self.default_context_panel.set_selection_text("No Selection")
             return
-
         try:
             count = corel.get_selection_count()
             if count == 0:
-                self.selection_label.setText("No Selection")
+                selection_text = "No Selection"
             elif count == 1:
-                self.selection_label.setText("1 object selected")
+                selection_text = "1 object selected"
             else:
-                self.selection_label.setText(f"{count} objects selected")
-        except:
+                selection_text = f"{count} objects selected"
+            self.selection_label.setText(selection_text)
+            self.default_context_panel.set_selection_text(selection_text)
+            self.selection_changed.emit(count)
+            if force:
+                self._refresh_current_tool_selection(force=True)
+        except Exception:
             self.selection_label.setText("Selection unavailable")
+            self.default_context_panel.set_selection_text("Selection unavailable")
 
-    def _show_status_message(self, message: str, timeout: int = 5000):
-        """Show a message in the status bar."""
-        self.status_bar.showMessage(message, timeout)
+    def _show_status_message(self, message: str, timeout: int = 4000):
+        self.statusBar().showMessage(message, timeout)
 
     def _update_progress(self, value: int, maximum: int = 100):
-        """Update progress bar."""
         if value < 0:
             self.progress_bar.setVisible(False)
-        else:
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setMaximum(maximum)
-            self.progress_bar.setValue(value)
+            return
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(maximum)
+        self.progress_bar.setValue(value)
 
     def _new_project(self):
-        """Create a new project."""
-        # Reset all tools to defaults
-        for key in self._tool_keys:
-            widget = self._get_tool_widget(key)
-            if widget and hasattr(widget, "reset_to_defaults"):
+        for widget in self._tool_widgets.values():
+            if hasattr(widget, "reset_to_defaults"):
                 widget.reset_to_defaults()
         self._show_status_message("New project created")
 
     def _open_project(self):
-        """Open an existing project."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Project",
+            self,
+            "Open Project",
             str(Path.home()),
-            "Project Files (*.cdap);;All Files (*)"
+            "Project Files (*.cdap);;All Files (*)",
         )
         if file_path:
             config.add_recent_file(file_path)
@@ -556,203 +664,277 @@ class MainWindow(QMainWindow):
             self._show_status_message(f"Opened: {file_path}")
 
     def _save_project(self):
-        """Save current project."""
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Project",
+            self,
+            "Save Project",
             str(Path.home()),
-            "Project Files (*.cdap);;All Files (*)"
+            "Project Files (*.cdap);;All Files (*)",
         )
         if file_path:
             config.add_recent_file(file_path)
             self._update_recent_files_menu()
             self._show_status_message(f"Saved: {file_path}")
 
+    def _open_settings_dialog(self):
+        dialog = SettingsDialog(self)
+        dialog.exec_()
+        app = QApplication.instance()
+        theme_manager = getattr(app, "theme_manager", None) if app is not None else None
+        if theme_manager is not None:
+            theme_manager.refresh(self)
+        self._apply_window_behavior()
+
+    def _apply_window_behavior(self):
+        """Apply window-level behavior that can be changed in Settings."""
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, bool(config.app.always_on_top))
+        self.show()
+
     def _update_recent_files_menu(self):
-        """Update the recent files menu."""
+        if not hasattr(self, "recent_menu"):
+            return
         self.recent_menu.clear()
-        for file_path in config.recent_files[:10]:
+        if not config.recent_files:
+            action = QAction("No recent files", self)
+            action.setEnabled(False)
+            self.recent_menu.addAction(action)
+            return
+
+        for file_path in config.recent_files[: config.app.recent_files_limit]:
             action = QAction(Path(file_path).name, self)
-            action.setData(file_path)
-            action.triggered.connect(lambda checked, fp=file_path: self._open_recent_file(fp))
+            action.setToolTip(file_path)
+            action.triggered.connect(lambda checked=False, fp=file_path: self._open_recent_file(fp))
             self.recent_menu.addAction(action)
 
-        if not config.recent_files:
-            no_files = QAction("No recent files", self)
-            no_files.setEnabled(False)
-            self.recent_menu.addAction(no_files)
-
     def _open_recent_file(self, file_path: str):
-        """Open a recent file."""
         if Path(file_path).exists():
             config.add_recent_file(file_path)
             self._update_recent_files_menu()
             self._show_status_message(f"Opened: {file_path}")
-        else:
-            QMessageBox.warning(
-                self, "File Not Found",
-                f"The file no longer exists:\n{file_path}"
-            )
+            return
+        QMessageBox.warning(self, "File Not Found", f"The file no longer exists:\n{file_path}")
 
     def _undo(self):
-        """Undo last action."""
-        if corel.is_connected:
-            try:
-                corel.app.ActiveDocument.Undo()
-                self._show_status_message("Undo performed")
-            except:
-                self._show_status_message("Nothing to undo")
+        if not corel.is_connected:
+            self._show_status_message("Not connected")
+            return
+        try:
+            corel.app.ActiveDocument.Undo()
+            self._show_status_message("Undo performed")
+        except Exception:
+            self._show_status_message("Nothing to undo")
 
     def _redo(self):
-        """Redo last undone action."""
-        if corel.is_connected:
-            try:
-                corel.app.ActiveDocument.Redo()
-                self._show_status_message("Redo performed")
-            except:
-                self._show_status_message("Nothing to redo")
+        if not corel.is_connected:
+            self._show_status_message("Not connected")
+            return
+        try:
+            corel.app.ActiveDocument.Redo()
+            self._show_status_message("Redo performed")
+        except Exception:
+            self._show_status_message("Nothing to redo")
 
-    def _show_settings(self):
-        """Show settings dialog."""
-        from .dialogs.settings_dialog import SettingsDialog
-        dialog = SettingsDialog(self)
-        if dialog.exec_():
-            self._show_status_message("Settings saved")
+    def _on_preset_dock_visibility_changed(self, visible: bool):
+        if visible:
+            self._ensure_preset_browser()
+        if hasattr(self, "toggle_preset_browser_action"):
+            self.toggle_preset_browser_action.blockSignals(True)
+            self.toggle_preset_browser_action.setChecked(visible)
+            self.toggle_preset_browser_action.blockSignals(False)
 
     def _ensure_preset_browser(self):
-        """Ensure preset browser is instantiated."""
-        if self.preset_browser is None:
-            self._on_preset_dock_visible(True)
+        if self.preset_browser is not None:
+            return
+        from .widgets.preset_browser import PresetBrowser
+
+        self.preset_browser = PresetBrowser(self)
+        self.preset_browser.preset_selected.connect(self._apply_preset)
+        self.preset_dock.setWidget(self.preset_browser)
+
+    def _tool_key_from_preset_tool(self, tool_name: str) -> str:
+        alias_map = {
+            "curve_filler": "curve_filler",
+            "rhinestone": "rhinestone",
+            "hexagon": "hexagon",
+            "photo_svg": "photo_svg",
+            "pattern_fill": "pattern_fill",
+            "batch": "batch_processor",
+            "batch_processor": "batch_processor",
+            "object": "object_tools",
+            "object_tools": "object_tools",
+            "typography": "typography",
+        }
+        return alias_map.get(tool_name, tool_name)
+
+    def _preset_metadata_for_tool(self, tool_key: str):
+        mapping = {
+            "curve_filler": ("curve_filler", "curve_filler"),
+            "rhinestone": ("rhinestone", "rhinestone"),
+            "hexagon": ("hexagon", "custom"),
+            "photo_svg": ("photo_svg", "custom"),
+            "pattern_fill": ("pattern_fill", "custom"),
+            "batch_processor": ("batch", "batch"),
+            "object_tools": ("object", "object"),
+            "typography": ("typography", "typography"),
+        }
+        return mapping.get(tool_key, (tool_key, "custom"))
+
+    def _serialize_preset_value(self, value):
+        if is_dataclass(value):
+            return {key: self._serialize_preset_value(item) for key, item in asdict(value).items()}
+        if hasattr(value, "value"):
+            return value.value
+        if isinstance(value, dict):
+            return {key: self._serialize_preset_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._serialize_preset_value(item) for item in value]
+        return value
+
+    def _collect_preset_settings(self, widget):
+        if hasattr(widget, "_config"):
+            return self._serialize_preset_value(widget._config())
+        if hasattr(widget, "_build_settings"):
+            return self._serialize_preset_value(widget._build_settings())
+        return None
 
     def _save_current_preset(self):
-        """Save current tool settings as preset."""
-        current_widget = self.tab_widget.currentWidget()
-        if hasattr(current_widget, 'save_as_preset'):
-            current_widget.save_as_preset()
+        widget = self._current_tool_widget()
+        if widget is None:
+            QMessageBox.information(self, "Presets", "Open a tool first.")
+            return
+        if hasattr(widget, "save_as_preset"):
+            widget.save_as_preset()
+            return
+        settings = self._collect_preset_settings(widget)
+        if not settings:
+            QMessageBox.information(
+                self,
+                "Presets",
+                "This tool does not expose preset saving yet in the current build. Existing presets can still be loaded and managed.",
+            )
+            return
+
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
+        if not ok or not name.strip():
+            return
+
+        tool_name, category = self._preset_metadata_for_tool(self._current_tool_key or "")
+        preset_manager.save_preset(
+            name=name.strip(),
+            tool=tool_name,
+            settings=settings,
+            category=category,
+        )
+        if self.preset_browser is not None:
+            self.preset_browser.refresh()
+        self._show_status_message(f"Preset '{name.strip()}' saved")
 
     def _load_preset(self):
-        """Load a preset."""
-        # Show preset browser or dialog
         self._ensure_preset_browser()
         self.preset_dock.show()
         self.preset_dock.raise_()
 
-    def _quick_load_preset(self):
-        """Quick load favorite preset."""
-        favorites = preset_manager.get_favorites()
-        if favorites:
-            # Load first favorite (could show a popup menu)
-            self._apply_preset(favorites[0]['id'])
-        else:
-            self._show_status_message("No favorite presets available")
-
     def _apply_preset(self, preset_id: str):
-        """Apply a preset to the current tool."""
         preset_data = preset_manager.load_preset(preset_id)
-        if preset_data:
-            tool = preset_data['metadata']['tool']
-            settings = preset_data['settings']
+        if not preset_data:
+            QMessageBox.warning(self, "Preset", "Failed to load the selected preset.")
+            return
 
-            # Apply to appropriate tool
-            if tool == 'curve_filler':
-                widget = self._get_tool_widget("curve_filler")
-                widget.apply_preset(settings)
-                self.tab_widget.setCurrentWidget(widget)
-            elif tool == 'rhinestone':
-                widget = self._get_tool_widget("rhinestone")
-                widget.apply_preset(settings)
-                self.tab_widget.setCurrentWidget(widget)
+        tool_key = self._tool_key_from_preset_tool(preset_data["metadata"].get("tool", ""))
+        widget = self._ensure_tool_widget(tool_key)
+        if widget is None:
+            QMessageBox.warning(self, "Preset", f"No tool is registered for preset type '{tool_key}'.")
+            return
+        if not hasattr(widget, "apply_preset"):
+            QMessageBox.information(self, "Preset", f"{preset_data['metadata'].get('name', 'Preset')} cannot be applied to this tool yet.")
+            return
 
-            self._show_status_message(f"Preset '{preset_data['metadata']['name']}' applied")
+        widget.apply_preset(preset_data.get("settings", {}))
+        self._activate_tool(tool_key)
+        self._show_status_message(f"Preset '{preset_data['metadata'].get('name', 'Preset')}' applied")
 
     def _manage_presets(self):
-        """Open preset management dialog."""
         self._ensure_preset_browser()
         self.preset_dock.show()
         self.preset_dock.raise_()
 
     def _import_preset(self):
-        """Import a preset from file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Preset",
+            self,
+            "Import Preset",
             str(Path.home()),
-            "Preset Files (*.json);;All Files (*)"
+            "Preset Files (*.json);;All Files (*)",
         )
-        if file_path:
-            preset_id = preset_manager.import_preset(Path(file_path))
-            if preset_id:
-                self._ensure_preset_browser()
-                self.preset_browser.refresh()
-                self._show_status_message(f"Preset imported successfully")
-            else:
-                QMessageBox.warning(self, "Import Failed", "Failed to import preset")
+        if not file_path:
+            return
+        preset_id = preset_manager.import_preset(Path(file_path))
+        if not preset_id:
+            QMessageBox.warning(self, "Import Failed", "Failed to import preset.")
+            return
+        self._ensure_preset_browser()
+        self.preset_browser.refresh()
+        self._show_status_message("Preset imported successfully")
 
     def _export_preset(self):
-        """Export a preset to file."""
-        # Would show preset selection dialog first
-        self._show_status_message("Select a preset to export from the Preset Browser")
+        self._ensure_preset_browser()
+        self.preset_dock.show()
+        self.preset_dock.raise_()
+        self._show_status_message("Select a preset in the browser to manage export or file copy.")
 
     def _toggle_preset_browser(self, checked: bool):
-        """Toggle preset browser visibility."""
         if checked:
             self._ensure_preset_browser()
-        self.preset_dock.setVisible(checked)
+        if self.preset_dock is not None:
+            self.preset_dock.setVisible(checked)
 
-    def _toggle_theme(self, dark: bool):
-        """Toggle between dark and light theme."""
-        from src.main import apply_theme
-        app = QApplication.instance()
-        if app:
-            apply_theme(app, "dark" if dark else "light")
-        config.app.theme = "dark" if dark else "light"
-        config.save()
+    def _toggle_context_panel(self, visible: bool):
+        self.context_host.setVisible(visible)
 
     def _show_help_contents(self):
-        """Show comprehensive help dialog."""
         from .dialogs.help_dialog import HelpDialog
+
         dialog = HelpDialog(self)
         dialog.exec_()
 
     def _show_quick_start(self):
-        """Show quick start guide."""
-        from .dialogs.help_dialog import HelpDialog
-        dialog = HelpDialog(self)
-        dialog.exec_()
+        self._show_help_contents()
 
     def _show_shortcuts(self):
-        """Show keyboard shortcuts."""
-        from .dialogs.help_dialog import HelpDialog
-        dialog = HelpDialog(self)
-        dialog.exec_()
+        self._show_help_contents()
 
     def _check_updates(self):
-        """Check for application updates."""
-        QMessageBox.information(
-            self, "Check for Updates",
-            "You are running the latest version (v0.1.0-beta)"
-        )
+        QMessageBox.information(self, "Check for Updates", "You are running v0.1.0-beta.")
 
     def _show_about(self):
-        """Show about dialog."""
         from .dialogs.about_dialog import AboutDialog
+
         dialog = AboutDialog(self)
         dialog.exec_()
 
-    def _auto_save(self):
-        """Auto-save current work."""
-        config.save()
-        logger.debug("Auto-save completed")
+    def _restore_geometry(self):
+        width = config.app.window_width or 1480
+        height = config.app.window_height or 900
+        x = config.app.window_x
+        y = config.app.window_y
+        if x >= 0 and y >= 0:
+            self.setGeometry(x, y, width, height)
+        else:
+            self.resize(width, height)
+
+    def _save_geometry(self):
+        if not self.isMaximized():
+            config.app.window_width = self.width()
+            config.app.window_height = self.height()
+            config.app.window_x = self.x()
+            config.app.window_y = self.y()
 
     def closeEvent(self, event):
-        """Handle window close event."""
-        # Save window geometry
+        for key, widget in list(self._tool_widgets.items()):
+            try:
+                widget.on_tool_deactivated()
+            except Exception as exc:
+                logger.warning("Failed to deactivate tool %s during close: %s", key, exc)
         self._save_geometry()
-        
-        # Save configuration
         config.save()
-
-        # Disconnect from CorelDRAW
         if corel.is_connected:
             corel.disconnect()
-
-        logger.info("Application closing.")
         event.accept()

@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QInputDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QFont, QIcon
 
 from ...core.preset_manager import preset_manager
 from ..icon_utils import apply_button_icons
@@ -83,7 +83,9 @@ class PresetBrowser(QWidget):
         # Info section
         self.info_label = QLabel("Select a preset to see details")
         self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet("font-size: 10px; color: #888;")
+        info_font = QFont(self.info_label.font())
+        info_font.setPointSize(max(8, info_font.pointSize() - 1))
+        self.info_label.setFont(info_font)
         layout.addWidget(self.info_label)
 
         icon_map = {

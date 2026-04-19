@@ -5,6 +5,9 @@
 PyQt5>=5.15.0
 pywin32>=300
 pillow>=9.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+svgwrite>=1.4.0
 
 # Optional but recommended
 pyinstaller>=5.0

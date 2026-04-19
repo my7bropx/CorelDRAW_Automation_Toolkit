@@ -5,75 +5,19 @@ Main application entry point.
 
 import sys
 import logging
+import time
+import os
 from pathlib import Path
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QSplashScreen
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter
 
-
-def apply_theme(app: QApplication, theme_name: str):
-    """Apply application theme."""
-    if theme_name == "dark":
-        # Gruvbox Dark theme colors
-        bg = "#282828"
-        bg_bright = "#3c3836"
-        fg = "#ebdbb2"
-        red = "#cc241d"
-        green = "#98971a"
-        yellow = "#d79921"
-        blue = "#458588"
-        aqua = "#689d6a"
-        gray = "#928374"
-        
-        dark_style = f"""
-        QMainWindow {{ background-color: {bg}; }}
-        QWidget {{ background-color: {bg_bright}; color: {fg}; selection-background-color: {blue}; selection-color: {bg}; }}
-        QMenuBar {{ background-color: {bg_bright}; color: {fg}; }}
-        QMenuBar::item:selected {{ background-color: {blue}; }}
-        QMenu {{ background-color: {bg_bright}; border: 1px solid {gray}; }}
-        QMenu::item:selected {{ background-color: {blue}; }}
-        QToolBar {{ background-color: {bg_bright}; border: none; spacing: 3px; }}
-        QPushButton {{ background-color: {gray}; border: none; border-radius: 4px; padding: 6px 16px; color: {fg}; min-width: 80px; }}
-        QPushButton:hover {{ background-color: {aqua}; }}
-        QPushButton:pressed {{ background-color: {blue}; }}
-        QPushButton:disabled {{ background-color: {bg}; color: {gray}; }}
-        QTabWidget::pane {{ border: 1px solid {gray}; background-color: {bg}; }}
-        QTabBar::tab {{ background-color: {bg}; color: {fg}; padding: 8px 16px; border: 1px solid {gray}; border-bottom: none; margin-right: 2px; }}
-        QTabBar::tab:selected {{ background-color: {bg_bright}; border-bottom: 2px solid {red}; }}
-        QTabBar::tab:hover {{ background-color: #504945; }}
-        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background-color: {bg}; color: {fg}; border: 1px solid {gray}; border-radius: 3px; padding: 4px; }}
-        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {blue}; }}
-        QSlider::groove:horizontal {{ border: 1px solid {gray}; height: 6px; background-color: {bg}; border-radius: 3px; }}
-        QSlider::handle:horizontal {{ background-color: {blue}; border: 1px solid {aqua}; width: 14px; margin: -4px 0; border-radius: 7px; }}
-        QSlider::handle:horizontal:hover {{ background-color: {aqua}; }}
-        QGroupBox {{ border: 1px solid {gray}; border-radius: 4px; margin-top: 8px; padding-top: 8px; color: {fg}; }}
-        QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {yellow}; }}
-        QScrollBar:vertical {{ background-color: {bg}; width: 12px; margin: 0; }}
-        QScrollBar::handle:vertical {{ background-color: {gray}; border-radius: 6px; min-height: 20px; }}
-        QScrollBar::handle:vertical:hover {{ background-color: {aqua}; }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-        QStatusBar {{ background-color: {bg}; color: {fg}; }}
-        QProgressBar {{ border: 1px solid {gray}; border-radius: 3px; text-align: center; background-color: {bg}; color: {fg}; }}
-        QProgressBar::chunk {{ background-color: {green}; border-radius: 2px; }}
-        QCheckBox {{ color: {fg}; spacing: 8px; }}
-        QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {gray}; border-radius: 3px; background-color: {bg}; }}
-        QCheckBox::indicator:checked {{ background-color: {blue}; border-color: {blue}; }}
-        QLabel {{ color: {fg}; }}
-        QToolTip {{ background-color: {bg_bright}; color: {fg}; border: 1px solid {gray}; padding: 4px; }}
-        QDockWidget {{ color: {fg}; titlebar-close-icon: none; }}
-        QDockWidget::title {{ background-color: {bg}; padding: 6px; }}
-        QTreeView, QListView, QTableView {{ background-color: {bg}; alternate-background-color: {bg_bright}; border: 1px solid {gray}; color: {fg}; }}
-        QTreeView::item:selected, QListView::item:selected, QTableView::item:selected {{ background-color: {blue}; color: {bg}; }}
-        QHeaderView::section {{ background-color: {bg_bright}; color: {fg}; border: 1px solid {gray}; padding: 4px; }}
-        """
-        app.setStyleSheet(dark_style)
-    else:
-        app.setStyleSheet("")
+from src.ui.theme_manager import ThemeManager
 
 
 def setup_logging(log_dir: Path):
@@ -101,32 +45,86 @@ def setup_logging(log_dir: Path):
 
 def main():
     """Main application entry point."""
-    # Enable High DPI
+    import os
+    import ctypes
+    
+    # Force DPI awareness for Windows
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.kernel32.SetProcessDPIAware()
+        except Exception:
+            pass
+    
+    # Set Qt scaling environment variables BEFORE QApplication
+    os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
+    os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'RoundPreferFloor'
+    os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
+    os.environ['QT_USE_NATIVE_DIALOGS'] = '1'
+    
+    # Disable OpenGL to avoid scaling issues
+    os.environ['QT_OPENGL'] = 'software'
+    
+    # Enable High DPI scaling
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, False)
+    
     # Create app
     app = QApplication(sys.argv)
     app.setApplicationName("CorelDRAW Automation Toolkit")
     app.setApplicationVersion("0.1.0-beta")
     app.setOrganizationName("CorelDRAW Automation")
     app.setOrganizationDomain("coreldraw-automation.com")
-
-    # Set font
-    font = QFont("Segoe UI", 9)
+    
+    # Calculate proper font size based on DPI
+    screen = app.primaryScreen()
+    if screen:
+        dpi = screen.logicalDotsPerInch()
+        # Scale font: 9pt at 96 DPI, scale proportionally
+        font_scale = max(0.75, min(1.25, dpi / 96.0))
+        base_font_size = 9 * font_scale
+    else:
+        base_font_size = 9
+    
+    # Set font with calculated size
+    font = app.font()
+    font.setPointSize(max(8, int(base_font_size)))
     app.setFont(font)
+
+    # Global exception handler
+    def exception_hook(exc_type, exc_value, exc_traceback):
+        import traceback as tb
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger = logging.getLogger("CorelDRAW_Automation_Toolkit")
+        logger.critical("Uncaught exception: %s", "".join(tb.format_exception(exc_type, exc_value, exc_traceback)))
+        log_dir = os.path.join(os.environ.get('APPDATA', ''), 'CorelDRAW_Automation_Toolkit', 'logs')
+        crash_file = os.path.join(log_dir, f"crash_{int(time.time())}.log")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            with open(crash_file, 'w') as f:
+                f.write("".join(tb.format_exception(exc_type, exc_value, exc_traceback)))
+        except:
+            pass
+    
+    sys.excepthook = exception_hook
 
     # Load config
     from src.config import config
-    config.app.theme = config.app.theme or "dark"
+    config.app.theme = "system"
     
     # Setup logging
     log_dir = config.logs_directory
     logger = setup_logging(log_dir)
     logger.info("Application starting...")
 
-    # Apply theme
-    apply_theme(app, config.app.theme)
+    theme_manager = ThemeManager(app)
+    theme_manager.apply_system_theme()
+    app.theme_manager = theme_manager
 
     # Set application icon
     try:
@@ -136,10 +134,37 @@ def main():
     except Exception as e:
         logger.warning(f"Could not load icon: {e}")
 
+    # Show splash/loading screen
+    from PyQt5.QtGui import QColor
+
+    palette = app.palette()
+    splash_bg = palette.color(palette.Window)
+    splash_fg = palette.color(palette.WindowText)
+    splash_accent = palette.color(palette.Highlight)
+
+    # Create simple splash using the active system palette
+    splash_pix = QPixmap(400, 200)
+    splash_pix.fill(splash_bg)
+    
+    # Draw text on splash
+    painter = QPainter(splash_pix)
+    painter.setPen(splash_fg)
+    painter.setFont(QFont("Segoe UI", 16, QFont.Bold))
+    painter.drawText(0, 80, 400, 60, int(Qt.AlignCenter), "CorelDRAW Automation Toolkit")
+    painter.setFont(QFont("Segoe UI", 11))
+    painter.setPen(splash_accent)
+    painter.drawText(0, 120, 400, 40, int(Qt.AlignCenter), "Loading...")
+    painter.end()
+    
+    splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
+    splash.show()
+    app.processEvents()
+
     # Create and show main window
     try:
         from src.ui.main_window import MainWindow
         window = MainWindow()
+        splash.finish(window)
         window.show()
 
         # Install bundled macros after UI is visible (faster startup)

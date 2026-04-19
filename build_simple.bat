@@ -12,16 +12,31 @@ echo.
 cd /d "%~dp0"
 
 REM Check for Python
-python --version >nul 2>&1
+set "PYTHON_EXE="
+if exist "%~dp0.venv\Scripts\python.exe" (
+    "%~dp0.venv\Scripts\python.exe" --version >nul 2>&1
+    if not errorlevel 1 set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+)
+if not defined PYTHON_EXE (
+    for %%V in (311 310 39 38) do (
+        if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python%%V\python.exe" (
+            "%LocalAppData%\Programs\Python\Python%%V\python.exe" --version >nul 2>&1
+            if not errorlevel 1 set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python%%V\python.exe"
+        )
+    )
+)
+if not defined PYTHON_EXE set "PYTHON_EXE=python"
+
+"%PYTHON_EXE%" --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python not found!
-    echo Please install Python 3.8-3.11 and add it to PATH
+    echo Please install Python 3.8-3.11, add it to PATH, or create .venv in the project root
     pause
     exit /b 1
 )
 
 echo Python found:
-python --version
+"%PYTHON_EXE%" --version
 echo.
 
 REM Clean old builds
@@ -32,10 +47,18 @@ if exist "build" rmdir /s /q "build"
 REM Check/Install PyInstaller
 echo.
 echo Checking PyInstaller...
-python -c "import PyInstaller" >nul 2>&1
+"%PYTHON_EXE%" -c "import PyInstaller" >nul 2>&1
 if errorlevel 1 (
     echo Installing PyInstaller...
-    pip install pyinstaller
+    "%PYTHON_EXE%" -m pip install pyinstaller
+)
+
+echo Installing runtime dependencies...
+"%PYTHON_EXE%" -m pip install PyQt5 pywin32 pillow numpy opencv-python svgwrite
+if errorlevel 1 (
+    echo ERROR: Failed to install runtime dependencies!
+    pause
+    exit /b 1
 )
 
 REM Build
@@ -46,7 +69,7 @@ echo ========================================
 echo This will take 5-10 minutes...
 echo.
 
-pyinstaller CorelDRAW_Automation_Toolkit.spec --clean --noconfirm
+"%PYTHON_EXE%" -m PyInstaller CorelDRAW_Automation_Toolkit.spec --clean --noconfirm
 
 if errorlevel 1 (
     echo.

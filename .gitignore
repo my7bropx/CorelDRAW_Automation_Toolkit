@@ -113,6 +113,10 @@ venv.bak/
 
 # mkdocs documentation
 /site
+*.ps1
+*.cmd
+*.txt
+*.bat
 
 # mypy
 .mypy_cache/

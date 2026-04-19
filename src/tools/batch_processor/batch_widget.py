@@ -1,119 +1,125 @@
-"""
-Batch Processor Widget
-PyQt5 UI for batch processing automation.
-"""
-
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
-    QLabel, QPushButton, QSpinBox, QComboBox, QCheckBox,
-    QListWidget, QProgressBar, QFileDialog, QLineEdit,
-    QMessageBox, QListWidgetItem, QPlainTextEdit
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
 
 from ...config import config
 from ...core.corel_interface import corel
 from ...core.preset_manager import preset_manager
-from ...tools.curve_filler.curve_filler_engine import CurveFillerEngine, FillSettings, SpacingMode, AngleMode, PatternMode
-from ...ui.icon_utils import apply_button_icons
+from ...tools.curve_filler.curve_filler_engine import AngleMode, CurveFillerEngine, FillSettings, PatternMode, SpacingMode
+from ...ui.widgets.collapsible_section import CollapsibleSection
+from ...ui.widgets.tool_base import ToolBaseWidget
+from ...ui.widgets.tool_components import ActionBar, InfoPanel, SettingsGroup, ToolHeader
 
 logger = logging.getLogger(__name__)
 
 
-class BatchProcessorWidget(QWidget):
-    """Widget for batch processing operations."""
-
+class BatchProcessorWidget(ToolBaseWidget):
     status_message = pyqtSignal(str)
     progress_updated = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
-        """Initialize the batch processor widget."""
-        super().__init__(parent)
+        super().__init__("Batch Processor", parent)
         self._file_list = []
-        self._init_ui()
+        self._build_ui()
+        self._configure_interaction_help()
+        self.add_stretch()
         logger.info("Batch processor widget initialized.")
 
-    def _init_ui(self):
-        """Initialize the user interface."""
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
+    def _build_ui(self):
+        self.add_widget(
+            ToolHeader(
+                "Batch Processor",
+                "Run repetitive CorelDRAW operations across queued files with export, conversion, and optional curve-fill automation.",
+            )
+        )
+        self.add_widget(self._build_queue_section())
+        self.add_widget(self._build_operations_section())
+        self.add_widget(self._build_output_section())
+        self.add_widget(self._build_watch_section())
+        self.add_widget(self._build_processing_section())
+        self.set_context_panel(self._build_info_panel())
 
-        # File selection
-        files_group = QGroupBox("File Queue")
-        files_layout = QVBoxLayout(files_group)
-        files_layout.setContentsMargins(8, 8, 8, 8)
+    def _build_queue_section(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         self.file_list_widget = QListWidget()
-        self.file_list_widget.setMinimumHeight(150)
-        files_layout.addWidget(self.file_list_widget)
+        self.file_list_widget.setMinimumHeight(180)
+        layout.addWidget(self.file_list_widget)
 
-        file_btn_layout = QHBoxLayout()
-
-        add_files_btn = QPushButton("Add Files")
-        add_files_btn.setStyleSheet("padding: 6px;")
+        row = QHBoxLayout()
+        self.add_files_btn = QPushButton("Add Files")
+        add_files_btn = self.add_files_btn
         add_files_btn.clicked.connect(self._add_files)
-        file_btn_layout.addWidget(add_files_btn)
+        row.addWidget(add_files_btn)
 
-        add_folder_btn = QPushButton("Add Folder")
-        add_folder_btn.setStyleSheet("padding: 6px;")
+        self.add_folder_btn = QPushButton("Add Folder")
+        add_folder_btn = self.add_folder_btn
         add_folder_btn.clicked.connect(self._add_folder)
-        file_btn_layout.addWidget(add_folder_btn)
+        row.addWidget(add_folder_btn)
 
-        remove_btn = QPushButton("Remove")
+        self.remove_btn = QPushButton("Remove")
+        remove_btn = self.remove_btn
         remove_btn.clicked.connect(self._remove_selected)
-        file_btn_layout.addWidget(remove_btn)
+        row.addWidget(remove_btn)
 
-        clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet("background-color: #cc241d; padding: 6px;")
+        self.clear_queue_btn = QPushButton("Clear Queue")
+        clear_btn = self.clear_queue_btn
         clear_btn.clicked.connect(self._clear_list)
-        file_btn_layout.addWidget(clear_btn)
+        row.addWidget(clear_btn)
 
-        files_layout.addLayout(file_btn_layout)
-        main_layout.addWidget(files_group)
+        layout.addLayout(row)
+        return CollapsibleSection("File Queue", content, True)
 
-        # Operations panel
-        operations_layout = QHBoxLayout()
+    def _build_operations_section(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # Left - Operation settings
-        operation_group = QGroupBox("Batch Operations")
-        operation_layout = QVBoxLayout(operation_group)
-
-        # Curve fill operation
-        curve_fill_check = QCheckBox("Apply Curve Fill Preset")
-        operation_layout.addWidget(curve_fill_check)
+        curve_group = SettingsGroup("Curve Fill Operation")
+        self.chk_curve_fill = QCheckBox("Apply Curve Fill Preset")
+        curve_group.add_full_row(self.chk_curve_fill)
 
         self.curve_fill_preset = QComboBox()
         self.curve_fill_preset.addItem("Select preset...")
         self.curve_fill_preset.addItem("Basic Grid Fill")
         self.curve_fill_preset.addItem("Path Following")
         self.curve_fill_preset.addItem("Decorative Scatter")
-        operation_layout.addWidget(self.curve_fill_preset)
+        curve_group.add_row("Preset", self.curve_fill_preset)
 
         self.curve_container_name = QLineEdit()
-        self.curve_container_name.setPlaceholderText("Container name (optional)")
-        operation_layout.addWidget(self.curve_container_name)
-
+        curve_group.add_row("Container name", self.curve_container_name)
         self.curve_elements_name = QLineEdit()
-        self.curve_elements_name.setPlaceholderText("Elements name (optional)")
-        operation_layout.addWidget(self.curve_elements_name)
-
+        curve_group.add_row("Elements name", self.curve_elements_name)
         self.curve_layer_name = QLineEdit()
-        self.curve_layer_name.setPlaceholderText("Layer name (optional)")
-        operation_layout.addWidget(self.curve_layer_name)
+        curve_group.add_row("Layer name", self.curve_layer_name)
+        layout.addWidget(curve_group)
 
-        hint = QLabel("Auto-select by name/layer if no valid selection")
-        hint.setStyleSheet("color: #aaa; font-size: 11px;")
-        operation_layout.addWidget(hint)
-
-        # Export operation
-        export_check = QCheckBox("Export to Format")
-        operation_layout.addWidget(export_check)
-
+        doc_group = SettingsGroup("Document Operations")
+        self.chk_export = QCheckBox("Export processed files")
+        doc_group.add_full_row(self.chk_export)
         self.export_format = QComboBox()
         self.export_format.addItem("PDF", "pdf")
         self.export_format.addItem("SVG", "svg")
@@ -121,143 +127,185 @@ class BatchProcessorWidget(QWidget):
         self.export_format.addItem("EPS", "eps")
         self.export_format.addItem("PNG", "png")
         self.export_format.addItem("JPEG", "jpg")
-        operation_layout.addWidget(self.export_format)
+        doc_group.add_row("Format", self.export_format)
 
-        # Resize operation
-        resize_check = QCheckBox("Resize Documents")
-        operation_layout.addWidget(resize_check)
-
-        resize_layout = QHBoxLayout()
+        self.chk_resize = QCheckBox("Resize page")
+        doc_group.add_full_row(self.chk_resize)
         self.resize_width = QSpinBox()
         self.resize_width.setRange(100, 10000)
         self.resize_width.setValue(1000)
         self.resize_width.setSuffix(" mm")
-        resize_layout.addWidget(QLabel("W:"))
-        resize_layout.addWidget(self.resize_width)
+        doc_group.add_row("Page width", self.resize_width)
 
         self.resize_height = QSpinBox()
         self.resize_height.setRange(100, 10000)
         self.resize_height.setValue(1000)
         self.resize_height.setSuffix(" mm")
-        resize_layout.addWidget(QLabel("H:"))
-        resize_layout.addWidget(self.resize_height)
-        operation_layout.addLayout(resize_layout)
+        doc_group.add_row("Page height", self.resize_height)
 
-        # Color conversion
-        color_check = QCheckBox("Convert Colors")
-        operation_layout.addWidget(color_check)
-
+        self.chk_color = QCheckBox("Convert color mode")
+        doc_group.add_full_row(self.chk_color)
         self.color_mode = QComboBox()
         self.color_mode.addItem("CMYK", "cmyk")
         self.color_mode.addItem("RGB", "rgb")
         self.color_mode.addItem("Grayscale", "grayscale")
-        operation_layout.addWidget(self.color_mode)
+        doc_group.add_row("Color mode", self.color_mode)
+        layout.addWidget(doc_group)
 
-        operation_layout.addStretch()
-        operations_layout.addWidget(operation_group)
+        return CollapsibleSection("Operations", content, True)
 
-        # Right - Output settings
-        output_group = QGroupBox("Output Settings")
-        output_layout = QFormLayout(output_group)
+    def _build_output_section(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
 
+        group = SettingsGroup("Output Rules")
         self.output_folder = QLineEdit()
-        self.output_folder.setPlaceholderText("Same as source")
-        output_layout.addRow("Output Folder:", self.output_folder)
+        group.add_row("Output folder", self.output_folder)
 
-        browse_output_btn = QPushButton("Browse...")
+        self.browse_output_btn = QPushButton("Browse...")
+        browse_output_btn = self.browse_output_btn
         browse_output_btn.clicked.connect(self._browse_output)
-        output_layout.addRow("", browse_output_btn)
+        group.add_full_row(browse_output_btn)
 
         self.naming_pattern = QComboBox()
         self.naming_pattern.addItem("Original name", "original")
         self.naming_pattern.addItem("Original + suffix", "suffix")
         self.naming_pattern.addItem("Prefix + original", "prefix")
         self.naming_pattern.addItem("Sequential numbering", "sequential")
-        output_layout.addRow("Naming:", self.naming_pattern)
+        group.add_row("Naming", self.naming_pattern)
 
         self.suffix_text = QLineEdit("_processed")
-        output_layout.addRow("Suffix/Prefix:", self.suffix_text)
+        group.add_row("Suffix / Prefix", self.suffix_text)
 
         self.overwrite_check = QCheckBox("Overwrite existing files")
-        output_layout.addRow("", self.overwrite_check)
+        group.add_full_row(self.overwrite_check)
 
         self.create_backup = QCheckBox("Create backup before processing")
         self.create_backup.setChecked(config.batch_processor.auto_backup)
-        output_layout.addRow("", self.create_backup)
+        group.add_full_row(self.create_backup)
+        layout.addWidget(group)
 
-        operations_layout.addWidget(output_group)
-        main_layout.addLayout(operations_layout)
+        return CollapsibleSection("Output Settings", content, True)
 
-        # Watch folder settings
-        watch_group = QGroupBox("Watch Folder (Auto-processing)")
-        watch_layout = QFormLayout(watch_group)
+    def _build_watch_section(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
 
+        group = SettingsGroup("Watch Folder")
         self.watch_enabled = QCheckBox("Enable watch folder")
         self.watch_enabled.setChecked(config.batch_processor.watch_folder_enabled)
-        watch_layout.addRow("", self.watch_enabled)
+        group.add_full_row(self.watch_enabled)
 
         self.watch_folder = QLineEdit(config.batch_processor.watch_folder_path)
-        watch_layout.addRow("Folder:", self.watch_folder)
+        group.add_row("Folder", self.watch_folder)
 
-        browse_watch_btn = QPushButton("Browse...")
+        self.browse_watch_btn = QPushButton("Browse...")
+        browse_watch_btn = self.browse_watch_btn
         browse_watch_btn.clicked.connect(self._browse_watch_folder)
-        watch_layout.addRow("", browse_watch_btn)
+        group.add_full_row(browse_watch_btn)
+        layout.addWidget(group)
 
-        main_layout.addWidget(watch_group)
+        return CollapsibleSection("Watch Folder", content, False)
 
-        # Progress and controls
-        progress_group = QGroupBox("Processing")
-        progress_layout = QVBoxLayout(progress_group)
+    def _build_processing_section(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         self.batch_progress = QProgressBar()
         self.batch_progress.setValue(0)
-        progress_layout.addWidget(self.batch_progress)
+        layout.addWidget(self.batch_progress)
 
         self.current_file_label = QLabel("Ready to process")
-        progress_layout.addWidget(self.current_file_label)
+        layout.addWidget(self.current_file_label)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setMinimumHeight(120)
-        progress_layout.addWidget(self.log_output)
+        self.log_output.setMinimumHeight(150)
+        layout.addWidget(self.log_output)
 
-        control_layout = QHBoxLayout()
-
-        self.start_btn = QPushButton("Start Batch")
-        self.start_btn.setStyleSheet("background-color: #98971a; font-weight: bold; padding: 10px;")
-        self.start_btn.clicked.connect(self._start_processing)
-        control_layout.addWidget(self.start_btn)
-
-        self.stop_btn = QPushButton("Stop")
+        actions = ActionBar("Validate", "Start Batch", "Clear Log", "Stop")
+        actions.preview_btn.clicked.connect(self._validate_queue)
+        actions.apply_btn.clicked.connect(self._start_processing)
+        actions.clear_btn.clicked.connect(self._clear_log)
+        actions.export_btn.clicked.connect(self._stop_processing)
+        self.start_btn = actions.apply_btn
+        self.stop_btn = actions.export_btn
         self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_processing)
-        control_layout.addWidget(self.stop_btn)
+        layout.addWidget(actions)
 
-        clear_log_btn = QPushButton("Clear Log")
-        clear_log_btn.clicked.connect(self._clear_log)
-        control_layout.addWidget(clear_log_btn)
+        return CollapsibleSection("Processing", content, True)
 
-        progress_layout.addLayout(control_layout)
-        main_layout.addWidget(progress_group)
+    def _build_info_panel(self):
+        self.lbl_queue = QLabel("0 file(s)")
+        self.lbl_output_rule = QLabel("Original name")
+        self.lbl_backup = QLabel("Enabled" if self.create_backup.isChecked() else "Disabled")
+        self.lbl_status = QLabel("Idle")
+        self.lbl_current = QLabel("-")
+        self.lbl_watch = QLabel("Disabled")
 
-        icon_map = {
-            "add files": "add.png",
-            "add folder": "add.png",
-            "remove": "remove.png",
-            "clear": "clear.png",
-            "browse...": "action.png",
-            "start batch": "apply.png",
-            "stop": "clear.png",
-            "clear log": "clear.png",
-        }
-        apply_button_icons(self, icon_map)
+        return InfoPanel(
+            "Batch Processor Info",
+            sections=[
+                ("Queue", [("Files", self.lbl_queue), ("Current", self.lbl_current)]),
+                ("Output", [("Naming", self.lbl_output_rule), ("Backups", self.lbl_backup)]),
+                ("Automation", [("Watch folder", self.lbl_watch), ("Status", self.lbl_status)]),
+            ],
+        )
+
+    def _refresh_info(self, status: str = None):
+        self.lbl_queue.setText(f"{len(self._file_list)} file(s)")
+        self.lbl_output_rule.setText(self.naming_pattern.currentText())
+        self.lbl_backup.setText("Enabled" if self.create_backup.isChecked() else "Disabled")
+        self.lbl_watch.setText(self.watch_folder.text().strip() or "Disabled")
+        self.lbl_current.setText(self.current_file_label.text())
+        if status is not None:
+            self.lbl_status.setText(status)
+
+    def _configure_interaction_help(self):
+        self.enable_safe_panel_interactions()
+        self.apply_default_button_tooltips()
+        self.apply_tooltips([
+            (self.file_list_widget, "Queue of files that will be processed in order. Review this list before starting a batch run."),
+            (self.add_files_btn, "Add one or more files to the batch queue."),
+            (self.add_folder_btn, "Add all matching files from a folder to the batch queue."),
+            (self.remove_btn, "Remove the currently selected entries from the batch queue."),
+            (self.clear_queue_btn, "Clear every queued file so you can rebuild the batch list."),
+            (self.chk_curve_fill, "Apply a curve fill preset after each file is opened. This adds automation but depends on matching object names."),
+            (self.curve_fill_preset, "Preset used for automated curve fill processing. Different presets change spacing, pattern, and curve behavior."),
+            (self.curve_container_name, "Name of the object that should be used as the curve fill container during batch processing."),
+            (self.curve_elements_name, "Name of the object or group used as the fill element source during batch processing."),
+            (self.curve_layer_name, "Layer name to target when looking up or writing curve fill content."),
+            (self.chk_export, "Export each processed file after automation completes. This adds output files but increases run time."),
+            (self.export_format, "Choose the export format written for each processed document. Some formats preserve vectors better than others."),
+            (self.chk_resize, "Resize the page before export. Useful for normalization, but it changes final document dimensions."),
+            (self.resize_width, "Target page width in millimeters when resize is enabled."),
+            (self.resize_height, "Target page height in millimeters when resize is enabled."),
+            (self.chk_color, "Convert document color mode before export. Use this when production output requires a specific color space."),
+            (self.color_mode, "Target color mode for conversion. This affects output compatibility and color appearance."),
+            (self.output_folder, "Folder where exported and processed files are written."),
+            (self.browse_output_btn, "Choose the output folder used for processed files."),
+            (self.naming_pattern, "Rule used to name processed files. This changes how easy results are to track and sort."),
+            (self.suffix_text, "Text added as a suffix or prefix when the naming rule requires it."),
+            (self.overwrite_check, "Allow new output files to replace existing files with the same name."),
+            (self.create_backup, "Copy the original file before processing so you can recover if the batch result is not correct."),
+            (self.watch_enabled, "Enable folder watching so new files in the folder can be processed automatically."),
+            (self.watch_folder, "Folder monitored for incoming files when watch mode is enabled."),
+            (self.browse_watch_btn, "Choose the folder monitored by watch mode."),
+            (self.batch_progress, "Shows overall progress for the current batch run."),
+            (self.current_file_label, "Displays the file currently being validated or processed."),
+            (self.log_output, "Detailed processing log for validation, batch execution, and stop events."),
+        ])
 
     def _add_files(self):
-        """Add files to the batch queue."""
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Add Files",
+            self,
+            "Add Files",
             str(Path.home()),
-            "CorelDRAW Files (*.cdr);;All Files (*)"
+            "CorelDRAW Files (*.cdr);;All Files (*)",
         )
 
         for file_path in files:
@@ -265,29 +313,24 @@ class BatchProcessorWidget(QWidget):
                 self._file_list.append(file_path)
                 self.file_list_widget.addItem(Path(file_path).name)
 
+        self._refresh_info(status="Files queued")
         self.status_message.emit(f"Added {len(files)} file(s) to queue")
 
     def _add_folder(self):
-        """Add all CDR files from a folder."""
-        folder = QFileDialog.getExistingDirectory(
-            self, "Add Folder",
-            str(Path.home())
-        )
-
+        folder = QFileDialog.getExistingDirectory(self, "Add Folder", str(Path.home()))
         if folder:
             folder_path = Path(folder)
             cdr_files = list(folder_path.glob("*.cdr"))
-
             for file_path in cdr_files:
                 str_path = str(file_path)
                 if str_path not in self._file_list:
                     self._file_list.append(str_path)
                     self.file_list_widget.addItem(file_path.name)
 
+            self._refresh_info(status="Folder imported")
             self.status_message.emit(f"Added {len(cdr_files)} file(s) from folder")
 
     def _remove_selected(self):
-        """Remove selected files from queue."""
         selected_items = self.file_list_widget.selectedItems()
         for item in selected_items:
             row = self.file_list_widget.row(item)
@@ -295,38 +338,38 @@ class BatchProcessorWidget(QWidget):
             if row < len(self._file_list):
                 del self._file_list[row]
 
+        self._refresh_info(status="Queue updated")
         self.status_message.emit(f"Removed {len(selected_items)} file(s)")
 
     def _clear_list(self):
-        """Clear all files from queue."""
         self.file_list_widget.clear()
         self._file_list.clear()
+        self._refresh_info(status="Queue cleared")
         self.status_message.emit("File queue cleared")
 
     def _browse_output(self):
-        """Browse for output folder."""
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder",
-            str(Path.home())
-        )
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", str(Path.home()))
         if folder:
             self.output_folder.setText(folder)
+            self._refresh_info(status="Output updated")
 
     def _browse_watch_folder(self):
-        """Browse for watch folder."""
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Watch Folder",
-            str(Path.home())
-        )
+        folder = QFileDialog.getExistingDirectory(self, "Select Watch Folder", str(Path.home()))
         if folder:
             self.watch_folder.setText(folder)
+            self._refresh_info(status="Watch folder updated")
+
+    def _validate_queue(self):
+        if not self._file_list:
+            QMessageBox.information(self, "Queue Empty", "Add files or a folder to start batch work.")
+            return
+        self._refresh_info(status="Ready")
+        self._log(f"Queue validated: {len(self._file_list)} file(s)")
 
     def _start_processing(self):
-        """Start batch processing."""
         if not self._file_list:
             QMessageBox.warning(self, "No Files", "Please add files to the queue first.")
             return
-
         if not corel.is_connected:
             QMessageBox.warning(self, "Not Connected", "Please connect to CorelDRAW first.")
             return
@@ -337,25 +380,9 @@ class BatchProcessorWidget(QWidget):
         total = len(self._file_list)
         self.batch_progress.setMaximum(total)
 
-        curve_fill_enabled = False
-        export_enabled = False
-        resize_enabled = False
-        color_enabled = False
-
-        # Extract enabled operations
-        for child in self.findChildren(QCheckBox):
-            if child.text() == "Apply Curve Fill Preset":
-                curve_fill_enabled = child.isChecked()
-            elif child.text() == "Export to Format":
-                export_enabled = child.isChecked()
-            elif child.text() == "Resize Documents":
-                resize_enabled = child.isChecked()
-            elif child.text() == "Convert Colors":
-                color_enabled = child.isChecked()
-
         preset_name = self.curve_fill_preset.currentText()
         preset_settings = None
-        if curve_fill_enabled and preset_name and preset_name != "Select preset...":
+        if self.chk_curve_fill.isChecked() and preset_name and preset_name != "Select preset...":
             matches = preset_manager.search_presets(preset_name, tool="curve_filler")
             if matches:
                 preset_data = preset_manager.load_preset(matches[0]["id"])
@@ -363,32 +390,29 @@ class BatchProcessorWidget(QWidget):
                     preset_settings = preset_data.get("settings", {})
 
         output_dir = self.output_folder.text().strip() or None
+        self._refresh_info(status="Running")
 
         for i, file_path in enumerate(self._file_list):
             self.current_file_label.setText(f"Processing: {Path(file_path).name}")
             self.batch_progress.setValue(i + 1)
             self.progress_updated.emit(i + 1, total)
+            self._refresh_info()
             self._log(f"Processing: {file_path}")
 
             try:
-                # Backup if enabled
                 if self.create_backup.isChecked():
-                    backup_path = f"{file_path}.bak"
-                    shutil.copy2(file_path, backup_path)
+                    shutil.copy2(file_path, f"{file_path}.bak")
 
-                # Open document
                 doc = corel.app.OpenDocument(file_path)
 
-                # Resize document
-                if resize_enabled:
+                if self.chk_resize.isChecked():
                     try:
                         doc.ActivePage.SizeWidth = self.resize_width.value()
                         doc.ActivePage.SizeHeight = self.resize_height.value()
-                    except Exception as e:
-                        logger.warning(f"Resize failed: {e}")
+                    except Exception as exc:
+                        logger.warning("Resize failed: %s", exc)
 
-                # Convert colors (best-effort)
-                if color_enabled:
+                if self.chk_color.isChecked():
                     try:
                         mode = self.color_mode.currentData()
                         if mode == "cmyk":
@@ -397,11 +421,10 @@ class BatchProcessorWidget(QWidget):
                             doc.ConvertToRGB()
                         elif mode == "grayscale":
                             doc.ConvertToGrayscale()
-                    except Exception as e:
-                        logger.warning(f"Color conversion failed: {e}")
+                    except Exception as exc:
+                        logger.warning("Color conversion failed: %s", exc)
 
-                # Apply curve fill preset if possible
-                if curve_fill_enabled and preset_settings:
+                if self.chk_curve_fill.isChecked() and preset_settings:
                     try:
                         engine = CurveFillerEngine()
                         container, elements = self._resolve_curve_fill_targets(doc)
@@ -411,37 +434,17 @@ class BatchProcessorWidget(QWidget):
                             settings = FillSettings(
                                 spacing_mode=SpacingMode(preset_settings.get("spacing_mode", "fixed")),
                                 spacing_value=preset_settings.get("spacing_value", 10.0),
-                                spacing_percentage=preset_settings.get("spacing_percentage", 100.0),
-                                spacing_min=preset_settings.get("spacing_min", 5.0),
-                                spacing_max=preset_settings.get("spacing_max", 20.0),
-                                start_padding=preset_settings.get("start_padding", 0.0),
-                                end_padding=preset_settings.get("end_padding", 0.0),
                                 angle_mode=AngleMode(preset_settings.get("angle_mode", "follow_curve")),
                                 fixed_angle=preset_settings.get("fixed_angle", 0.0),
-                                angle_min=preset_settings.get("angle_min", 0.0),
-                                angle_max=preset_settings.get("angle_max", 360.0),
-                                angle_increment=preset_settings.get("angle_increment", 15.0),
-                                element_count=preset_settings.get("element_count", 0),
-                                offset_from_curve=preset_settings.get("offset_from_curve", 0.0),
-                                collision_detection=preset_settings.get("collision_detection", False),
-                                smart_corners=preset_settings.get("smart_corners", True),
-                                distribute_evenly=preset_settings.get("distribute_evenly", False),
-                                scale_mode=preset_settings.get("scale_mode", "uniform"),
-                                scale_factor=preset_settings.get("scale_factor", 1.0),
-                                scale_start=preset_settings.get("scale_start", 0.5),
-                                scale_end=preset_settings.get("scale_end", 1.5),
                                 pattern_mode=PatternMode(preset_settings.get("pattern_mode", "single")),
                             )
                             engine.execute_fill(settings=settings)
                         else:
-                            msg = "Curve fill skipped: no valid container/elements."
-                            self._log(msg)
-                            QMessageBox.warning(self, "Curve Fill Skipped", msg)
-                    except Exception as e:
-                        self._log(f"Curve fill failed: {e}")
+                            self._log("Curve fill skipped: no valid container/elements.")
+                    except Exception as exc:
+                        self._log(f"Curve fill failed: {exc}")
 
-                # Export or save
-                if export_enabled:
+                if self.chk_export.isChecked():
                     fmt = self.export_format.currentData()
                     src_path = Path(file_path)
                     out_dir = Path(output_dir) if output_dir else src_path.parent
@@ -452,14 +455,14 @@ class BatchProcessorWidget(QWidget):
                     elif self.naming_pattern.currentData() == "prefix":
                         name = f"{self.suffix_text.text()}{base}"
                     elif self.naming_pattern.currentData() == "sequential":
-                        name = f"{base}_{i+1:03d}"
+                        name = f"{base}_{i + 1:03d}"
                     else:
                         name = base
                     out_path = out_dir / f"{name}.{fmt}"
                     try:
                         doc.SaveAs(str(out_path))
-                    except Exception as e:
-                        logger.warning(f"Export failed: {e}")
+                    except Exception as exc:
+                        logger.warning("Export failed: %s", exc)
                 else:
                     try:
                         doc.Save()
@@ -471,38 +474,33 @@ class BatchProcessorWidget(QWidget):
                 except Exception:
                     pass
 
-                logger.info(f"Processed: {file_path}")
                 self._log(f"Done: {file_path}")
-
-            except Exception as e:
-                logger.error(f"Processing error ({file_path}): {e}")
-                self._log(f"Error: {file_path} -> {e}")
+            except Exception as exc:
+                logger.error("Processing error (%s): %s", file_path, exc)
+                self._log(f"Error: {file_path} -> {exc}")
 
         self.current_file_label.setText(f"Completed {total} file(s)")
-        self.status_message.emit(f"Batch processing completed: {total} files")
-
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._refresh_info(status="Completed")
+        self.status_message.emit(f"Batch processing completed: {total} files")
 
     def _stop_processing(self):
-        """Stop batch processing."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.current_file_label.setText("Processing stopped")
+        self._refresh_info(status="Stopped")
         self.status_message.emit("Batch processing stopped")
         self._log("Batch processing stopped")
 
     def _log(self, message: str):
-        """Append a message to the batch log output."""
         self.log_output.appendPlainText(message)
 
     def _clear_log(self):
-        """Clear batch log output."""
         self.log_output.clear()
+        self._refresh_info(status="Idle")
 
     def _resolve_curve_fill_targets(self, doc):
-        """Resolve container and elements for curve fill."""
-        # 1) Prefer current selection if valid
         try:
             selection = corel.get_selection()
             if selection.Count >= 2:
@@ -515,7 +513,6 @@ class BatchProcessorWidget(QWidget):
         except Exception:
             pass
 
-        # 2) Auto-select by name/layer
         container_name = self.curve_container_name.text().strip().lower()
         elements_name = self.curve_elements_name.text().strip().lower()
         layer_name = self.curve_layer_name.text().strip().lower()
@@ -534,7 +531,6 @@ class BatchProcessorWidget(QWidget):
 
         container = None
         elements = corel.app.CreateShapeRange()
-
         for shape in shapes:
             try:
                 name = (getattr(shape, "Name", "") or "").lower()
@@ -544,9 +540,8 @@ class BatchProcessorWidget(QWidget):
                     layer_match = (getattr(layer, "Name", "") or "").lower() == layer_name
 
                 if not container:
-                    if container_name and container_name in name:
-                        if hasattr(shape, "Curve") and shape.Curve is not None:
-                            container = shape
+                    if container_name and container_name in name and hasattr(shape, "Curve") and shape.Curve is not None:
+                        container = shape
                     elif layer_match and hasattr(shape, "Curve") and shape.Curve is not None:
                         container = shape
 
@@ -561,11 +556,9 @@ class BatchProcessorWidget(QWidget):
         return container, elements
 
     def apply_preset(self, settings: Dict[str, Any]):
-        """Apply preset settings."""
         self.status_message.emit("Batch processor preset applied")
 
     def reset_to_defaults(self):
-        """Reset to default values."""
         self.file_list_widget.clear()
         self._file_list.clear()
         self.output_folder.clear()
@@ -579,4 +572,5 @@ class BatchProcessorWidget(QWidget):
         self.curve_elements_name.clear()
         self.curve_layer_name.clear()
         self.log_output.clear()
+        self._refresh_info(status="Idle")
         self.status_message.emit("Batch processor reset")

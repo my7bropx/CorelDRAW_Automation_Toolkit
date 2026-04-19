@@ -13,20 +13,100 @@ echo.
 
 REM Store original directory
 set "ORIGINAL_DIR=%CD%"
-cd /d "%~dp0"
+pushd "%~dp0"
+if errorlevel 1 (
+    echo [ERROR] Failed to enter project directory: %~dp0
+    pause
+    exit /b 1
+)
 set "PROJECT_ROOT=%CD%"
 
-REM Try to auto-fix Python PATH before checks
-call :ensure_python_path
+REM Resolve Python executable for this session
+set "PYTHON_EXE="
+set "PYTHON_READY="
+set "PYTHON_CANDIDATE=%PROJECT_ROOT%\.venv\Scripts\python.exe"
+if exist "%PYTHON_CANDIDATE%" (
+    "%PYTHON_CANDIDATE%" --version >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%PYTHON_CANDIDATE%"
+        set "PYTHON_READY=1"
+    )
+)
+if not "%PYTHON_READY%"=="1" (
+    set "PYTHON_CANDIDATE=%PROJECT_ROOT%\build_venv\Scripts\python.exe"
+    if exist "%PYTHON_CANDIDATE%" (
+        "%PYTHON_CANDIDATE%" --version >nul 2>&1
+        if not errorlevel 1 (
+            set "PYTHON_EXE=%PYTHON_CANDIDATE%"
+            set "PYTHON_READY=1"
+        )
+    )
+)
+for /f "delims=" %%P in ('where python 2^>nul') do (
+    if not "!PYTHON_READY!"=="1" (
+        "%%P" --version >nul 2>&1
+        if not errorlevel 1 (
+            set "PYTHON_EXE=%%P"
+            set "PYTHON_READY=1"
+        )
+    )
+)
+if not "%PYTHON_READY%"=="1" (
+    for /f "delims=" %%P in ('py -3.11 -c "import sys; print(sys.executable)" 2^>nul') do (
+        if not "!PYTHON_READY!"=="1" (
+            "%%P" --version >nul 2>&1
+            if not errorlevel 1 (
+                set "PYTHON_EXE=%%P"
+                set "PYTHON_READY=1"
+            )
+        )
+    )
+)
+if not "%PYTHON_READY%"=="1" (
+    for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
+        if not "!PYTHON_READY!"=="1" (
+            "%%P" --version >nul 2>&1
+            if not errorlevel 1 (
+                set "PYTHON_EXE=%%P"
+                set "PYTHON_READY=1"
+            )
+        )
+    )
+)
+if not "%PYTHON_READY%"=="1" (
+    for %%V in (311 310 39 38) do (
+        if not "!PYTHON_READY!"=="1" (
+            set "PYTHON_CANDIDATE=%LocalAppData%\Programs\Python\Python%%V\python.exe"
+            if exist "!PYTHON_CANDIDATE!" (
+                "!PYTHON_CANDIDATE!" --version >nul 2>&1
+                if not errorlevel 1 (
+                    set "PYTHON_EXE=!PYTHON_CANDIDATE!"
+                    set "PYTHON_READY=1"
+                )
+            )
+        )
+    )
+)
+if "%PYTHON_READY%"=="1" (
+    for %%I in ("%PYTHON_EXE%") do set "PY_DIR=%%~dpI"
+    if defined PY_DIR (
+        set "PY_DIR=%PY_DIR:~0,-1%"
+        set "SCRIPTS_DIR=%PY_DIR%\Scripts"
+        set "PATH=%PY_DIR%;%PATH%"
+        if exist "%SCRIPTS_DIR%" (
+            set "PATH=%SCRIPTS_DIR%;%PATH%"
+        )
+        echo [INFO] Using Python: %PYTHON_EXE%
+    )
+)
 
 REM Check for Python
-python --version >nul 2>&1
-if errorlevel 1 (
+if not "%PYTHON_READY%"=="1" (
     echo [ERROR] Python is not installed or not in PATH
     echo.
     echo Please install Python 3.8 or higher:
     echo   1. Visit https://python.org/downloads/
-    echo   2. Download Python 3.8 - 3.11 (NOT 3.12+)
+    echo   2. Download Python 3.8 - 3.11 ^(NOT 3.12+^)
     echo   3. Check "Add Python to PATH" during installation
     echo   4. Restart this script
     echo.
@@ -35,11 +115,11 @@ if errorlevel 1 (
 )
 
 REM Get Python version
-for /f "tokens=2" %%I in ('python --version 2^>^&1') do set PYTHON_VERSION=%%I
+for /f "tokens=2" %%I in ('"%PYTHON_EXE%" --version 2^>^&1') do set PYTHON_VERSION=%%I
 echo [INFO] Found Python %PYTHON_VERSION%
 
 REM Check Python version (3.8 - 3.11 recommended)
-python -c "import sys; v=sys.version_info; exit(0 if v.major==3 and v.minor>=8 and v.minor<=11 else 1)" >nul 2>&1
+"%PYTHON_EXE%" -c "import sys; v=sys.version_info; exit(0 if v.major==3 and v.minor>=8 and v.minor<=11 else 1)" >nul 2>&1
 if errorlevel 1 (
     echo [WARNING] Python version %PYTHON_VERSION% may have compatibility issues
     echo [WARNING] Recommended: Python 3.8 - 3.11
@@ -67,7 +147,7 @@ if exist "build_venv" (
 
 REM Create virtual environment
 echo Creating virtual environment...
-python -m venv "build_venv"
+"%PYTHON_EXE%" -m venv "build_venv"
 if errorlevel 1 (
     echo [ERROR] Failed to create virtual environment
     pause
@@ -118,6 +198,27 @@ echo Installing pillow...
 pip install pillow==10.2.0
 if errorlevel 1 (
     echo [ERROR] Failed to install pillow
+    goto :cleanup_error
+)
+
+echo Installing numpy...
+pip install numpy==1.26.4
+if errorlevel 1 (
+    echo [ERROR] Failed to install numpy
+    goto :cleanup_error
+)
+
+echo Installing opencv-python...
+pip install opencv-python==4.10.0.84
+if errorlevel 1 (
+    echo [ERROR] Failed to install opencv-python
+    goto :cleanup_error
+)
+
+echo Installing svgwrite...
+pip install svgwrite==1.4.3
+if errorlevel 1 (
+    echo [ERROR] Failed to install svgwrite
     goto :cleanup_error
 )
 
@@ -312,36 +413,15 @@ if errorlevel 2 (
 
 echo Done!
 echo.
-cd /d "%ORIGINAL_DIR%"
+popd
 pause
 exit /b 0
-
-:ensure_python_path
-where python >nul 2>&1
-if not errorlevel 1 goto :eof
-
-set "PY_EXE="
-for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do set "PY_EXE=%%P"
-if not defined PY_EXE goto :eof
-
-for %%I in ("%PY_EXE%") do set "PY_DIR=%%~dpI"
-if not defined PY_DIR goto :eof
-set "PY_DIR=%PY_DIR:~0,-1%"
-set "SCRIPTS_DIR=%PY_DIR%\Scripts"
-
-echo [INFO] Found Python via launcher. Adding Python to PATH automatically...
-echo %PATH% | find /I "%PY_DIR%" >nul || set "PATH=%PY_DIR%;%PATH%"
-if exist "%SCRIPTS_DIR%" (
-    echo %PATH% | find /I "%SCRIPTS_DIR%" >nul || set "PATH=%SCRIPTS_DIR%;%PATH%"
-)
-echo [INFO] PATH updated for this build session.
-goto :eof
 
 :cleanup_error
 echo.
 echo Cleaning up after error...
 call "build_venv\Scripts\deactivate.bat" 2>nul
 rmdir /s /q "build_venv" 2>nul
-cd /d "%ORIGINAL_DIR%"
+popd
 pause
 exit /b 1

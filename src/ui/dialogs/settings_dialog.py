@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 from ...config import config
+from ...core.corel_interface import CorelDRAWInterface
 from ..icon_utils import apply_button_icons
 
 
@@ -92,8 +93,7 @@ class SettingsDialog(QDialog):
         appearance_layout = QFormLayout(appearance_group)
 
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Dark", "dark")
-        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("System / Native", "system")
         appearance_layout.addRow("Theme:", self.theme_combo)
 
         self.tooltips_check = QCheckBox("Show tooltips")
@@ -101,6 +101,9 @@ class SettingsDialog(QDialog):
 
         self.animations_check = QCheckBox("Enable animations")
         appearance_layout.addRow("", self.animations_check)
+
+        self.always_on_top_check = QCheckBox("Keep toolkit window always on top")
+        appearance_layout.addRow("", self.always_on_top_check)
 
         layout.addWidget(appearance_group)
 
@@ -127,6 +130,34 @@ class SettingsDialog(QDialog):
         recent_layout.addRow("Maximum entries:", self.recent_limit)
 
         layout.addWidget(recent_group)
+
+        # CorelDRAW connection group
+        corel_group = QGroupBox("CorelDRAW Connection")
+        corel_layout = QFormLayout(corel_group)
+
+        self.corel_version_combo = QComboBox()
+        self.corel_version_combo.addItem("Auto-detect (any version)", "")
+        self.corel_version_combo.addItem("2024", "2024")
+        self.corel_version_combo.addItem("2023", "2023")
+        self.corel_version_combo.addItem("2022", "2022")
+        self.corel_version_combo.addItem("2021", "2021")
+        self.corel_version_combo.addItem("2020", "2020")
+        self.corel_version_combo.addItem("2019", "2019")
+        self.corel_version_combo.addItem("2018", "2018")
+        corel_layout.addRow("Preferred version:", self.corel_version_combo)
+
+        self.auto_connect_check = QCheckBox("Auto-connect on startup")
+        corel_layout.addRow("", self.auto_connect_check)
+
+        self.detect_versions_btn = QPushButton("Detect Installed Versions")
+        self.detect_versions_btn.clicked.connect(self._detect_corel_versions)
+        corel_layout.addRow("", self.detect_versions_btn)
+
+        self.version_status_label = QLabel("")
+        self.version_status_label.setWordWrap(True)
+        corel_layout.addRow("Status:", self.version_status_label)
+
+        layout.addWidget(corel_group)
 
         layout.addStretch()
         return widget
@@ -264,6 +295,7 @@ class SettingsDialog(QDialog):
 
         self.tooltips_check.setChecked(config.app.show_tooltips)
         self.animations_check.setChecked(config.app.enable_animations)
+        self.always_on_top_check.setChecked(config.app.always_on_top)
         self.autosave_check.setChecked(config.app.auto_save)
         self.autosave_interval.setValue(config.app.auto_save_interval)
         self.recent_limit.setValue(config.app.recent_files_limit)
@@ -297,12 +329,19 @@ class SettingsDialog(QDialog):
             self.log_level.setCurrentIndex(index)
         self.check_updates.setChecked(config.app.check_updates)
 
+        # CorelDRAW
+        index = self.corel_version_combo.findData(config.app.preferred_corel_version)
+        if index >= 0:
+            self.corel_version_combo.setCurrentIndex(index)
+        self.auto_connect_check.setChecked(config.app.auto_connect)
+
     def _apply_settings(self):
         """Apply settings from UI to config."""
         # General
         config.app.theme = self.theme_combo.currentData()
         config.app.show_tooltips = self.tooltips_check.isChecked()
         config.app.enable_animations = self.animations_check.isChecked()
+        config.app.always_on_top = self.always_on_top_check.isChecked()
         config.app.auto_save = self.autosave_check.isChecked()
         config.app.auto_save_interval = self.autosave_interval.value()
         config.app.recent_files_limit = self.recent_limit.value()
@@ -328,7 +367,36 @@ class SettingsDialog(QDialog):
         config.app.log_level = self.log_level.currentData()
         config.app.check_updates = self.check_updates.isChecked()
 
+        # CorelDRAW
+        config.app.preferred_corel_version = self.corel_version_combo.currentData()
+        config.app.auto_connect = self.auto_connect_check.isChecked()
+
         config.save()
+
+    def _detect_corel_versions(self):
+        """Detect installed CorelDRAW versions."""
+        try:
+            versions = CorelDRAWInterface.detect_installed_versions()
+            if versions:
+                version_list = ", ".join([v["version"] for v in versions])
+                self.version_status_label.setText(f"Found: {version_list}")
+                
+                # Update combo with detected versions
+                current = self.corel_version_combo.currentData()
+                self.corel_version_combo.clear()
+                self.corel_version_combo.addItem("Auto-detect (any version)", "")
+                for v in versions:
+                    self.corel_version_combo.addItem(f"CorelDRAW {v['version']} ({v['year']})", v["version"])
+                
+                # Try to restore previous selection
+                if current:
+                    index = self.corel_version_combo.findData(current)
+                    if index >= 0:
+                        self.corel_version_combo.setCurrentIndex(index)
+            else:
+                self.version_status_label.setText("No CorelDRAW versions detected")
+        except Exception as e:
+            self.version_status_label.setText(f"Error: {str(e)}")
 
     def _reset_to_defaults(self):
         """Reset all settings to defaults."""

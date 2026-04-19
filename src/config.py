@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AppSettings:
     """Application-wide settings."""
-    theme: str = "dark"
+    theme: str = "system"
     language: str = "en"
     auto_save: bool = True
     auto_save_interval: int = 300  # seconds
@@ -26,6 +26,7 @@ class AppSettings:
     high_dpi_support: bool = True
     check_updates: bool = True
     auto_connect: bool = True  # Auto-connect to CorelDRAW on startup
+    preferred_corel_version: str = ""  # Preferred CorelDRAW version (e.g., "2020", "2024")
     log_level: str = "INFO"
     workspace_path: str = ""
     plugin_directory: str = ""
@@ -34,6 +35,7 @@ class AppSettings:
     window_x: int = -1
     window_y: int = -1
     window_maximized: bool = False
+    always_on_top: bool = False
     macros_installed_hash: str = ""
 
 
